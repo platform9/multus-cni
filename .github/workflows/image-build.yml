@@ -35,7 +35,7 @@ jobs:
           context: .
           push: false
           tags: ghcr.io/${{ github.repository }}:latest-amd64
-          file: images/Dockerfile.thick
+          file: images/Dockerfile
 
   build-arm64:
     name: Image build/arm64
