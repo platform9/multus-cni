@@ -7,6 +7,7 @@ require (
 	github.com/containernetworking/plugins v0.9.1
 	github.com/fsnotify/fsnotify v1.7.0
 	github.com/k8snetworkplumbingwg/network-attachment-definition-client v1.1.1-0.20210510153419-66a699ae3b05
+	github.com/koron/go-dproxy v1.3.0
 	github.com/onsi/ginkgo v1.16.4
 	github.com/onsi/gomega v1.29.0
 	github.com/pkg/errors v0.9.1
@@ -22,8 +23,6 @@ require (
 	k8s.io/kubelet v0.29.3
 	k8s.io/kubernetes v1.29.3
 )
-
-require github.com/koron/go-dproxy v1.3.0
 
 require (
 	github.com/Microsoft/go-winio v0.6.0 // indirect
