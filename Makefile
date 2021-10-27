@@ -26,7 +26,7 @@ $(BUILD_ROOT):
 
 build: $(BUILD_DIR)
 	$(IMAGE_BUILD_CMD) --build-arg VERSION=$(UPSTREAM_VERSION) \
-		-t $(TAG) -f deployments/Dockerfile .
+		-t $(TAG) -f images/Dockerfile .
 	echo ${TAG} > $(BUILD_DIR)/container-tag
 
 scan: $(BUILD_ROOT)

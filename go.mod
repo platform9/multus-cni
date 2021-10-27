@@ -5,6 +5,7 @@ go 1.21
 require (
 	github.com/containernetworking/cni v0.8.1
 	github.com/containernetworking/plugins v0.9.1
+	github.com/fsnotify/fsnotify v1.7.0
 	github.com/k8snetworkplumbingwg/network-attachment-definition-client v1.1.1-0.20210510153419-66a699ae3b05
 	github.com/onsi/ginkgo v1.16.4
 	github.com/onsi/gomega v1.29.0
@@ -22,6 +23,8 @@ require (
 	k8s.io/kubernetes v1.29.3
 )
 
+require github.com/koron/go-dproxy v1.3.0
+
 require (
 	github.com/Microsoft/go-winio v0.6.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
@@ -30,7 +33,6 @@ require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/emicklei/go-restful/v3 v3.11.0 // indirect
 	github.com/evanphx/json-patch v4.12.0+incompatible // indirect
-	github.com/fsnotify/fsnotify v1.7.0 // indirect
 	github.com/go-logr/logr v1.4.1 // indirect
 	github.com/go-openapi/jsonpointer v0.19.6 // indirect
 	github.com/go-openapi/jsonreference v0.20.2 // indirect
