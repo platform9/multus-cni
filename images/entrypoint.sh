@@ -12,9 +12,11 @@ trap exitonsigterm SIGTERM
 
 # Set our known directories.
 CNI_CONF_DIR="/host/etc/cni/net.d"
+CNI_BIN_DIR="/host/opt/cni/bin"
 ADDITIONAL_BIN_DIR=""
 MULTUS_CONF_FILE="/usr/src/multus-cni/images/70-multus.conf"
 MULTUS_AUTOCONF_DIR="/host/etc/cni/net.d"
+MULTUS_BIN_FILE="/usr/src/multus-cni/bin/multus"
 MULTUS_KUBECONFIG_FILE_HOST="/etc/cni/net.d/multus.d/multus.kubeconfig"
 MULTUS_TEMP_KUBECONFIG="/tmp/multus.kubeconfig"
 MULTUS_MASTER_CNI_FILE_NAME=""
