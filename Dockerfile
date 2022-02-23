@@ -3,7 +3,7 @@ FROM centos:centos7 as build
 
 # Add everything
 ADD . /usr/src/multus-cni
-
+RUN yum update -y
 ENV INSTALL_PKGS "git golang-1.13.10-0.el7.x86_64"
 RUN rpm --import https://mirror.go-repo.io/centos/RPM-GPG-KEY-GO-REPO && \
     curl -s https://mirror.go-repo.io/centos/go-repo.repo | tee /etc/yum.repos.d/go-repo.repo && \
@@ -15,6 +15,7 @@ RUN rpm --import https://mirror.go-repo.io/centos/RPM-GPG-KEY-GO-REPO && \
 FROM centos:centos7
 COPY --from=build /usr/src/multus-cni /usr/src/multus-cni
 WORKDIR /
+RUN yum update -y
 
 ADD ./images/entrypoint.sh /
 ENTRYPOINT ["/entrypoint.sh"]
