@@ -60,7 +60,7 @@ var _ = Describe(suiteName, func() {
 		multusConfigFilePath = fmt.Sprintf("%s/%s", tmpDir, primaryCNIPluginName)
 		Expect(ioutil.WriteFile(multusConfigFilePath, []byte(primaryCNIPluginTemplate), userRWPermission)).To(Succeed())
 
-		multusConf := NewMultusConfig(
+		multusConf, _ := NewMultusConfig(
 			primaryCNIName,
 			cniVersion,
 			kubeconfig)
