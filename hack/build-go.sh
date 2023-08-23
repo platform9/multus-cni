@@ -21,40 +21,27 @@ if [ -z "$VERSION" ]; then
 fi
 DATE=$(date -u -d "@${SOURCE_DATE_EPOCH:-$(date +%s)}" --iso-8601=seconds)
 COMMIT=${COMMIT:-$(git rev-parse --verify HEAD)}
-LDFLAGS="-X main.version=${VERSION:-master} -X main.commit=${COMMIT} -X main.date=${DATE}"
-export CGO_ENABLED=0
+LDFLAGS="-X gopkg.in/k8snetworkplumbingwg/multus-cni.v4/pkg/multus.version=${VERSION} \
+	-X gopkg.in/k8snetworkplumbingwg/multus-cni.v4/pkg/multus.commit=${COMMIT} \
+	-X gopkg.in/k8snetworkplumbingwg/multus-cni.v4/pkg/multus.gitTreeState=${GIT_TREE_STATE} \
+	-X gopkg.in/k8snetworkplumbingwg/multus-cni.v4/pkg/multus.releaseStatus=${RELEASE_STATUS} \
+	-X gopkg.in/k8snetworkplumbingwg/multus-cni.v4/pkg/multus.date=${DATE}"
+export CGO_ENABLED=${CGO_ENABLED:-0}
 
-# this if... will be removed when gomodules goes default
-if [ "$GO111MODULE" == "off" ]; then
-	echo "Building plugin without go module"
-	echo "Warning: this will be deprecated in near future so please use go modules!"
+# build with go modules
+export GO111MODULE=on
 
-	ORG_PATH="gopkg.in/k8snetworkplumbingwg"
-	REPO_PATH="${ORG_PATH}/multus-cni.v3"
-
-	if [ ! -h gopath/src/${REPO_PATH} ]; then
-		mkdir -p gopath/src/${ORG_PATH}
-		ln -s ../../../.. gopath/src/${REPO_PATH} || exit 255
-	fi
-
-	export GO15VENDOREXPERIMENT=1
-	export GOBIN=${PWD}/bin
-	export GOPATH=${PWD}/gopath
-	go build -o ${PWD}/bin/multus -tags no_openssl -ldflags "${LDFLAGS}" "$@" ${REPO_PATH}/cmd
-	go build -o ${PWD}/bin/generate-kubeconfig -tags no_openssl -ldflags "${LDFLAGS}" ${REPO_PATH}/cmd/config-generation
-	go build -o ${PWD}/bin/multus-daemon -tags no_openssl -ldflags "${LDFLAGS}" "$@" ${REPO_PATH}/cmd/controller/
-else
-	# build with go modules
-	export GO111MODULE=on
-	BUILD_ARGS=(-o ${DEST_DIR}/multus -tags no_openssl)
-	if [ -n "$MODMODE" ]; then
-		BUILD_ARGS+=(-mod "$MODMODE")
-	fi
-
-	echo "Building plugins"
-	go build ${BUILD_ARGS[*]} -ldflags "${LDFLAGS}" "$@" ./cmd
-	echo "Building spec generators"
-	go build -o "${DEST_DIR}"/generate-kubeconfig -ldflags "${LDFLAGS}" ./cmd/config-generation
-	echo "Building multus controller"
-	go build -o "${DEST_DIR}"/multus-daemon -ldflags "${LDFLAGS}" ./cmd/controller/
+if [ -n "$MODMODE" ]; then
+	BUILD_ARGS=(-mod "$MODMODE")
 fi
+
+echo "Building multus"
+go build -o ${DEST_DIR}/multus ${BUILD_ARGS} -ldflags "${LDFLAGS}" "$@" ./cmd/multus
+echo "Building multus-daemon"
+go build -o "${DEST_DIR}"/multus-daemon ${BUILD_ARGS} -ldflags "${LDFLAGS}" ./cmd/multus-daemon
+echo "Building multus-shim"
+go build -o "${DEST_DIR}"/multus-shim ${BUILD_ARGS} -ldflags "${LDFLAGS}" ./cmd/multus-shim
+echo "Building install_multus"
+go build -o "${DEST_DIR}"/install_multus ${BUILD_ARGS} -ldflags "${LDFLAGS}" ./cmd/install_multus
+echo "Building thin_entrypoint"
+go build -o "${DEST_DIR}"/thin_entrypoint ${BUILD_ARGS} -ldflags "${LDFLAGS}" ./cmd/thin_entrypoint
