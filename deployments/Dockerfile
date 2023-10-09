@@ -1,5 +1,5 @@
 # This Dockerfile is used to build the image available on DockerHub
-FROM centos:centos8 as build
+FROM centos:centos7.9.2009 as build
 
 # Add everything
 ADD . /usr/src/multus-cni
@@ -12,7 +12,7 @@ RUN rpm --import https://mirror.go-repo.io/centos/RPM-GPG-KEY-GO-REPO && \
     cd /usr/src/multus-cni && \
     ./hack/build-go.sh
 
-FROM centos:centos8
+FROM centos:centos7.9.2009
 LABEL org.opencontainers.image.source https://github.com/k8snetworkplumbingwg/multus-cni
 COPY --from=build /usr/src/multus-cni /usr/src/multus-cni
 WORKDIR /
