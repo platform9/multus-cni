@@ -1,22 +1,16 @@
-# This Dockerfile is used to build the image available on DockerHub
-FROM centos:centos7 as build
+FROM golang:1.19 as build
 
 # Add everything
 ADD . /usr/src/multus-cni
-RUN yum update -y
-ENV INSTALL_PKGS "git golang-1.17.13-0.el7.x86_64"
-RUN rpm --import https://mirror.go-repo.io/centos/RPM-GPG-KEY-GO-REPO && \
-    curl -s https://mirror.go-repo.io/centos/go-repo.repo | tee /etc/yum.repos.d/go-repo.repo && \
-    yum install -y $INSTALL_PKGS && \
-    rpm -V $INSTALL_PKGS && \
-    cd /usr/src/multus-cni && \
-    ./hack/build-go.sh
 
-FROM gcr.io/distroless/base-debian11:latest
+RUN  cd /usr/src/multus-cni && \
+     ./hack/build-go.sh
+
+FROM gcr.io/distroless/base-debian11
 LABEL org.opencontainers.image.source https://github.com/k8snetworkplumbingwg/multus-cni
-COPY --from=build /usr/src/multus-cni /usr/src/multus-cni
+COPY --from=build /usr/src/multus-cni/bin /usr/src/multus-cni/bin
+COPY --from=build /usr/src/multus-cni/LICENSE /usr/src/multus-cni/LICENSE
 WORKDIR /
-RUN yum update -y
-
-ADD ./images/entrypoint.sh /
-ENTRYPOINT ["/entrypoint.sh"]
+COPY --from=build /usr/src/multus-cni/bin/install_multus /
+COPY --from=build /usr/src/multus-cni/bin/thin_entrypoint /
+ENTRYPOINT ["/thin_entrypoint"]
