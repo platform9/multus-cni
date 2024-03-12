@@ -14,6 +14,8 @@
 
 package multus
 
+// disable dot-imports only for testing
+//revive:disable:dot-imports
 import (
 	"bytes"
 	"context"
@@ -29,7 +31,7 @@ import (
 	cni100 "github.com/containernetworking/cni/pkg/types/100"
 	cniversion "github.com/containernetworking/cni/pkg/version"
 	netfake "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/clientset/versioned/fake"
-	"gopkg.in/k8snetworkplumbingwg/multus-cni.v3/pkg/k8sclient"
+	"gopkg.in/k8snetworkplumbingwg/multus-cni.v4/pkg/k8sclient"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/record"
 
@@ -224,7 +226,7 @@ func (f *fakeExec) FindInPath(plugin string, paths []string) (string, error) {
 func NewFakeClientInfo() *k8sclient.ClientInfo {
 	return &k8sclient.ClientInfo{
 		Client:        fake.NewSimpleClientset(),
-		NetClient:     netfake.NewSimpleClientset().K8sCniCncfIoV1(),
+		NetClient:     netfake.NewSimpleClientset(),
 		EventRecorder: record.NewFakeRecorder(10),
 	}
 }

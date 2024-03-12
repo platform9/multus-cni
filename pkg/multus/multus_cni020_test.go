@@ -14,6 +14,8 @@
 
 package multus
 
+// disable dot-imports only for testing
+//revive:disable:dot-imports
 import (
 	"context"
 	"fmt"
@@ -24,10 +26,10 @@ import (
 	types020 "github.com/containernetworking/cni/pkg/types/020"
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/containernetworking/plugins/pkg/testutils"
-	"gopkg.in/k8snetworkplumbingwg/multus-cni.v3/pkg/k8sclient"
-	"gopkg.in/k8snetworkplumbingwg/multus-cni.v3/pkg/logging"
-	testhelpers "gopkg.in/k8snetworkplumbingwg/multus-cni.v3/pkg/testing"
-	"gopkg.in/k8snetworkplumbingwg/multus-cni.v3/pkg/types"
+	"gopkg.in/k8snetworkplumbingwg/multus-cni.v4/pkg/k8sclient"
+	"gopkg.in/k8snetworkplumbingwg/multus-cni.v4/pkg/logging"
+	testhelpers "gopkg.in/k8snetworkplumbingwg/multus-cni.v4/pkg/testing"
+	"gopkg.in/k8snetworkplumbingwg/multus-cni.v4/pkg/types"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
 
@@ -134,6 +136,67 @@ var _ = Describe("multus operations cniVersion 0.2.0 config", func() {
 			IP4: &types020.IPConfig{
 				IP: *testhelpers.EnsureCIDR("1.1.1.5/24"),
 			},
+		}
+		expectedConf2 := `{
+	    "name": "other1",
+	    "cniVersion": "0.2.0",
+	    "type": "other-plugin"
+	}`
+		fExec.addPlugin020(nil, "net1", expectedConf2, expectedResult2, nil)
+
+		result, err := CmdAdd(args, fExec, nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fExec.addIndex).To(Equal(len(fExec.plugins)))
+		r := result.(*types020.Result)
+		// plugin 1 is the masterplugin
+		Expect(reflect.DeepEqual(r, expectedResult1)).To(BeTrue())
+
+		err = CmdDel(args, fExec, nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fExec.delIndex).To(Equal(len(fExec.plugins)))
+	})
+
+	It("executes delegates (plugin without interface)", func() {
+		args := &skel.CmdArgs{
+			ContainerID: "123456789",
+			Netns:       testNS.Path(),
+			IfName:      "eth0",
+			StdinData: []byte(`{
+	    "name": "node-cni-network",
+	    "type": "multus",
+	    "defaultnetworkfile": "/tmp/foo.multus.conf",
+	    "defaultnetworkwaitseconds": 3,
+	    "delegates": [{
+	        "name": "weave1",
+	        "cniVersion": "0.2.0",
+	        "type": "weave-net"
+	    },{
+	        "name": "other1",
+	        "cniVersion": "0.2.0",
+	        "type": "other-plugin"
+	    }]
+	}`),
+		}
+
+		logging.SetLogLevel("verbose")
+
+		fExec := newFakeExec()
+		expectedResult1 := &types020.Result{
+			CNIVersion: "0.2.0",
+			IP4: &types020.IPConfig{
+				IP: *testhelpers.EnsureCIDR("1.1.1.2/24"),
+			},
+		}
+		expectedConf1 := `{
+	    "name": "weave1",
+	    "cniVersion": "0.2.0",
+	    "type": "weave-net"
+	}`
+		fExec.addPlugin020(nil, "eth0", expectedConf1, expectedResult1, nil)
+
+		// other1 just returns empty result
+		expectedResult2 := &types020.Result{
+			CNIVersion: "0.2.0",
 		}
 		expectedConf2 := `{
 	    "name": "other1",

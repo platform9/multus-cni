@@ -14,29 +14,92 @@
 
 package multus
 
+// disable dot-imports only for testing
+//revive:disable:dot-imports
 import (
+	"context"
 	"fmt"
 	"os"
 	"reflect"
+	"sync"
+	"time"
 
 	"github.com/containernetworking/cni/pkg/skel"
 	cni100 "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/containernetworking/plugins/pkg/testutils"
-	"gopkg.in/k8snetworkplumbingwg/multus-cni.v3/pkg/k8sclient"
-	"gopkg.in/k8snetworkplumbingwg/multus-cni.v3/pkg/logging"
-	testhelpers "gopkg.in/k8snetworkplumbingwg/multus-cni.v3/pkg/testing"
-	"gopkg.in/k8snetworkplumbingwg/multus-cni.v3/pkg/types"
+	"gopkg.in/k8snetworkplumbingwg/multus-cni.v4/pkg/k8sclient"
+	"gopkg.in/k8snetworkplumbingwg/multus-cni.v4/pkg/logging"
+	testhelpers "gopkg.in/k8snetworkplumbingwg/multus-cni.v4/pkg/testing"
+	"gopkg.in/k8snetworkplumbingwg/multus-cni.v4/pkg/types"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	kapi "k8s.io/api/core/v1"
+	informerfactory "k8s.io/client-go/informers"
+	v1coreinformers "k8s.io/client-go/informers/core/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/cache"
+
+	netdefv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
+	netdefclient "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/clientset/versioned"
+	netdefinformer "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/informers/externalversions"
+	netdefinformerv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/informers/externalversions/k8s.cni.cncf.io/v1"
 )
+
+func newPodInformer(ctx context.Context, kclient kubernetes.Interface) cache.SharedIndexInformer {
+	informerFactory := informerfactory.NewSharedInformerFactory(kclient, 0*time.Second)
+
+	podInformer := informerFactory.InformerFor(&kapi.Pod{}, func(c kubernetes.Interface, resyncPeriod time.Duration) cache.SharedIndexInformer {
+		return v1coreinformers.NewFilteredPodInformer(
+			c,
+			kapi.NamespaceAll,
+			resyncPeriod,
+			cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc},
+			nil)
+	})
+
+	informerFactory.Start(ctx.Done())
+
+	waitCtx, waitCancel := context.WithTimeout(ctx, 20*time.Second)
+	if !cache.WaitForCacheSync(waitCtx.Done(), podInformer.HasSynced) {
+		logging.Errorf("failed to sync pod informer cache")
+	}
+	waitCancel()
+
+	return podInformer
+}
+
+func newNetDefInformer(ctx context.Context, client netdefclient.Interface) cache.SharedIndexInformer {
+	informerFactory := netdefinformer.NewSharedInformerFactory(client, 0*time.Second)
+
+	netdefInformer := informerFactory.InformerFor(&netdefv1.NetworkAttachmentDefinition{}, func(client netdefclient.Interface, resyncPeriod time.Duration) cache.SharedIndexInformer {
+		return netdefinformerv1.NewNetworkAttachmentDefinitionInformer(
+			client,
+			kapi.NamespaceAll,
+			resyncPeriod,
+			cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	})
+
+	informerFactory.Start(ctx.Done())
+
+	waitCtx, waitCancel := context.WithTimeout(ctx, 20*time.Second)
+	if !cache.WaitForCacheSync(waitCtx.Done(), netdefInformer.HasSynced) {
+		logging.Errorf("failed to sync pod informer cache")
+	}
+	waitCancel()
+
+	return netdefInformer
+}
 
 var _ = Describe("multus operations cniVersion 1.0.0 config", func() {
 	var testNS ns.NetNS
 	var tmpDir string
 	resultCNIVersion := "1.0.0"
 	configPath := "/tmp/foo.multus.conf"
+	var ctx context.Context
+	var cancel context.CancelFunc
 
 	BeforeEach(func() {
 		// Create a new NetNS so we don't modify the host
@@ -52,9 +115,12 @@ var _ = Describe("multus operations cniVersion 1.0.0 config", func() {
 		// Touch the default network file.
 		os.OpenFile(configPath, os.O_RDONLY|os.O_CREATE, 0755)
 
+		ctx, cancel = context.WithCancel(context.TODO())
 	})
 
 	AfterEach(func() {
+		cancel()
+
 		// Cleanup default network file.
 		if _, errStat := os.Stat(configPath); errStat == nil {
 			errRemove := os.Remove(configPath)
@@ -190,6 +256,71 @@ var _ = Describe("multus operations cniVersion 1.0.0 config", func() {
 
 		_, err := CmdAdd(args, fExec, nil)
 		Expect(err).To(MatchError("[//:weave1]: error adding container to network \"weave1\": DelegateAdd: cannot set \"weave-net\" interface name to \"eth0\": validateIfName: no net namespace fsdadfad found: failed to Statfs \"fsdadfad\": no such file or directory"))
+	})
+
+	It("executes delegates (plugin without interface)", func() {
+		args := &skel.CmdArgs{
+			ContainerID: "123456789",
+			Netns:       testNS.Path(),
+			IfName:      "eth0",
+			StdinData: []byte(`{
+	    "name": "node-cni-network",
+	    "type": "multus",
+	    "defaultnetworkfile": "/tmp/foo.multus.conf",
+	    "defaultnetworkwaitseconds": 3,
+	    "delegates": [{
+	        "name": "weave1",
+	        "cniVersion": "1.0.0",
+	        "type": "weave-net"
+	    },{
+	        "name": "other1",
+	        "cniVersion": "1.0.0",
+	        "type": "other-plugin"
+	    }]
+	}`),
+		}
+
+		logging.SetLogLevel("verbose")
+
+		fExec := newFakeExec()
+		expectedResult1 := &cni100.Result{
+			CNIVersion: "1.0.0",
+			IPs: []*cni100.IPConfig{{
+				Address: *testhelpers.EnsureCIDR("1.1.1.2/24"),
+			},
+			},
+		}
+		expectedConf1 := `{
+	    "name": "weave1",
+	    "cniVersion": "1.0.0",
+	    "type": "weave-net"
+	}`
+		fExec.addPlugin100(nil, "eth0", expectedConf1, expectedResult1, nil)
+
+		// other1 just returns empty result
+		expectedResult2 := &cni100.Result{
+			CNIVersion: "0.4.0",
+		}
+		expectedConf2 := `{
+	    "name": "other1",
+	    "cniVersion": "1.0.0",
+	    "type": "other-plugin"
+	}`
+		fExec.addPlugin100(nil, "net1", expectedConf2, expectedResult2, nil)
+
+		result, err := CmdAdd(args, fExec, nil)
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(fExec.addIndex).To(Equal(len(fExec.plugins)))
+		// plugin 1 is the masterplugin
+		Expect(reflect.DeepEqual(result, expectedResult1)).To(BeTrue())
+
+		err = CmdCheck(args, fExec, nil)
+		Expect(err).NotTo(HaveOccurred())
+
+		err = CmdDel(args, fExec, nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fExec.delIndex).To(Equal(len(fExec.plugins)))
 	})
 
 	It("returns the previous result using CmdCheck", func() {
@@ -762,6 +893,116 @@ var _ = Describe("multus operations cniVersion 1.0.0 config", func() {
 		fKubeClient.AddPod(fakePod)
 		_, err := fKubeClient.AddNetAttachDef(testhelpers.NewFakeNetAttachDef("kube-system", "net1", net1))
 		Expect(err).NotTo(HaveOccurred())
+
+		result, err := CmdAdd(args, fExec, fKubeClient)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fExec.addIndex).To(Equal(len(fExec.plugins)))
+		Expect(reflect.DeepEqual(result, expectedResult1)).To(BeTrue())
+
+		err = CmdDel(args, fExec, fKubeClient)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fExec.delIndex).To(Equal(len(fExec.plugins)))
+	})
+
+	It("executes clusterNetwork delegate with a shared informer", func() {
+		fakePod := testhelpers.NewFakePod("testpod", "", "kube-system/net1")
+		net1 := `{
+		"name": "net1",
+		"type": "mynet",
+		"cniVersion": "1.0.0"
+	}`
+		expectedResult1 := &cni100.Result{
+			CNIVersion: "1.0.0",
+			IPs: []*cni100.IPConfig{{
+				Address: *testhelpers.EnsureCIDR("1.1.1.2/24"),
+			},
+			},
+		}
+		args := &skel.CmdArgs{
+			ContainerID: "123456789",
+			Netns:       testNS.Path(),
+			IfName:      "eth0",
+			Args:        fmt.Sprintf("K8S_POD_NAME=%s;K8S_POD_NAMESPACE=%s", fakePod.ObjectMeta.Name, fakePod.ObjectMeta.Namespace),
+			StdinData: []byte(`{
+	    "name": "node-cni-network",
+	    "type": "multus",
+	    "kubeconfig": "/etc/kubernetes/node-kubeconfig.yaml",
+	    "defaultNetworks": [],
+	    "clusterNetwork": "net1",
+	    "delegates": []
+	}`),
+		}
+
+		fExec := newFakeExec()
+		fExec.addPlugin100(nil, "eth0", net1, expectedResult1, nil)
+
+		fKubeClient := NewFakeClientInfo()
+		fKubeClient.AddPod(fakePod)
+		_, err := fKubeClient.AddNetAttachDef(testhelpers.NewFakeNetAttachDef("kube-system", "net1", net1))
+		Expect(err).NotTo(HaveOccurred())
+
+		podInformer := newPodInformer(ctx, fKubeClient.Client)
+		netdefInformer := newNetDefInformer(ctx, fKubeClient.NetClient)
+		fKubeClient.SetK8sClientInformers(podInformer, netdefInformer)
+
+		result, err := CmdAdd(args, fExec, fKubeClient)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fExec.addIndex).To(Equal(len(fExec.plugins)))
+		Expect(reflect.DeepEqual(result, expectedResult1)).To(BeTrue())
+
+		err = CmdDel(args, fExec, fKubeClient)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fExec.delIndex).To(Equal(len(fExec.plugins)))
+	})
+
+	It("executes clusterNetwork delegate with a shared informer if pod is not immediately found", func() {
+		fakePod := testhelpers.NewFakePod("testpod", "", "kube-system/net1")
+		net1 := `{
+		"name": "net1",
+		"type": "mynet",
+		"cniVersion": "1.0.0"
+	}`
+		expectedResult1 := &cni100.Result{
+			CNIVersion: "1.0.0",
+			IPs: []*cni100.IPConfig{{
+				Address: *testhelpers.EnsureCIDR("1.1.1.2/24"),
+			},
+			},
+		}
+		args := &skel.CmdArgs{
+			ContainerID: "123456789",
+			Netns:       testNS.Path(),
+			IfName:      "eth0",
+			Args:        fmt.Sprintf("K8S_POD_NAME=%s;K8S_POD_NAMESPACE=%s", fakePod.ObjectMeta.Name, fakePod.ObjectMeta.Namespace),
+			StdinData: []byte(`{
+	    "name": "node-cni-network",
+	    "type": "multus",
+	    "kubeconfig": "/etc/kubernetes/node-kubeconfig.yaml",
+	    "defaultNetworks": [],
+	    "clusterNetwork": "net1",
+	    "delegates": []
+	}`),
+		}
+
+		fExec := newFakeExec()
+		fExec.addPlugin100(nil, "eth0", net1, expectedResult1, nil)
+
+		fKubeClient := NewFakeClientInfo()
+		_, err := fKubeClient.AddNetAttachDef(testhelpers.NewFakeNetAttachDef("kube-system", "net1", net1))
+		Expect(err).NotTo(HaveOccurred())
+
+		podInformer := newPodInformer(ctx, fKubeClient.Client)
+		netdefInformer := newNetDefInformer(ctx, fKubeClient.NetClient)
+		fKubeClient.SetK8sClientInformers(podInformer, netdefInformer)
+
+		wg := sync.WaitGroup{}
+		wg.Add(1)
+		go func() {
+			wg.Done()
+			time.Sleep(1 * time.Second)
+			fKubeClient.AddPod(fakePod)
+		}()
+		wg.Wait()
 
 		result, err := CmdAdd(args, fExec, fKubeClient)
 		Expect(err).NotTo(HaveOccurred())

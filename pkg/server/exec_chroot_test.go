@@ -14,6 +14,8 @@
 
 package server
 
+// disable dot-imports only for testing
+//revive:disable:dot-imports
 import (
 	"context"
 	"os"
@@ -43,15 +45,4 @@ var _ = Describe("exec_chroot", func() {
 		_, err := chrootExec.ExecPlugin(context.Background(), "/bin/true", nil, nil)
 		Expect(err).To(HaveOccurred())
 	})
-
-	It("Call ChrootExec.FindInPath with dummy", func() {
-		chrootExec := &ChrootExec{
-			Stderr:    os.Stderr,
-			chrootDir: "/usr/bin",
-		}
-
-		_, err := chrootExec.FindInPath("true", []string{"/"})
-		Expect(err).NotTo(HaveOccurred())
-	})
-
 })

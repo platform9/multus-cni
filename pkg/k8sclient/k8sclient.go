@@ -23,28 +23,25 @@ import (
 	"os"
 	"regexp"
 	"strings"
-	"time"
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/kubernetes/scheme"
-	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
-	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
+	listers "k8s.io/client-go/listers/core/v1"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
-	"k8s.io/klog"
 
 	"github.com/containernetworking/cni/libcni"
 	"github.com/containernetworking/cni/pkg/skel"
 	cnitypes "github.com/containernetworking/cni/pkg/types"
 	nettypes "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
-	netclient "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/clientset/versioned/typed/k8s.cni.cncf.io/v1"
+	netclient "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/clientset/versioned"
+	netlister "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/listers/k8s.cni.cncf.io/v1"
 	netutils "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/utils"
-	"gopkg.in/k8snetworkplumbingwg/multus-cni.v3/pkg/kubeletclient"
-	"gopkg.in/k8snetworkplumbingwg/multus-cni.v3/pkg/logging"
-	"gopkg.in/k8snetworkplumbingwg/multus-cni.v3/pkg/types"
+	"gopkg.in/k8snetworkplumbingwg/multus-cni.v4/pkg/kubeletclient"
+	"gopkg.in/k8snetworkplumbingwg/multus-cni.v4/pkg/logging"
+	"gopkg.in/k8snetworkplumbingwg/multus-cni.v4/pkg/types"
 )
 
 const (
@@ -61,9 +58,13 @@ type NoK8sNetworkError struct {
 // ClientInfo contains information given from k8s client
 type ClientInfo struct {
 	Client           kubernetes.Interface
-	NetClient        netclient.K8sCniCncfIoV1Interface
+	NetClient        netclient.Interface
 	EventBroadcaster record.EventBroadcaster
 	EventRecorder    record.EventRecorder
+
+	// multus-thick uses these informer
+	PodInformer    cache.SharedIndexInformer
+	NetDefInformer cache.SharedIndexInformer
 }
 
 // AddPod adds pod into kubernetes
@@ -73,6 +74,10 @@ func (c *ClientInfo) AddPod(pod *v1.Pod) (*v1.Pod, error) {
 
 // GetPod gets pod from kubernetes
 func (c *ClientInfo) GetPod(namespace, name string) (*v1.Pod, error) {
+	if c.PodInformer != nil {
+		logging.Debugf("GetPod for [%s/%s] will use informer cache", namespace, name)
+		return listers.NewPodLister(c.PodInformer.GetIndexer()).Pods(namespace).Get(name)
+	}
 	return c.Client.CoreV1().Pods(namespace).Get(context.TODO(), name, metav1.GetOptions{})
 }
 
@@ -83,7 +88,16 @@ func (c *ClientInfo) DeletePod(namespace, name string) error {
 
 // AddNetAttachDef adds net-attach-def into kubernetes
 func (c *ClientInfo) AddNetAttachDef(netattach *nettypes.NetworkAttachmentDefinition) (*nettypes.NetworkAttachmentDefinition, error) {
-	return c.NetClient.NetworkAttachmentDefinitions(netattach.ObjectMeta.Namespace).Create(context.TODO(), netattach, metav1.CreateOptions{})
+	return c.NetClient.K8sCniCncfIoV1().NetworkAttachmentDefinitions(netattach.ObjectMeta.Namespace).Create(context.TODO(), netattach, metav1.CreateOptions{})
+}
+
+// GetNetAttachDef get net-attach-def from kubernetes
+func (c *ClientInfo) GetNetAttachDef(namespace, name string) (*nettypes.NetworkAttachmentDefinition, error) {
+	if c.NetDefInformer != nil {
+		logging.Debugf("GetNetAttachDef for [%s/%s] will use informer cache", namespace, name)
+		return netlister.NewNetworkAttachmentDefinitionLister(c.NetDefInformer.GetIndexer()).NetworkAttachmentDefinitions(namespace).Get(name)
+	}
+	return c.NetClient.K8sCniCncfIoV1().NetworkAttachmentDefinitions(namespace).Get(context.TODO(), name, metav1.GetOptions{})
 }
 
 // Eventf puts event into kubernetes events
@@ -113,7 +127,7 @@ func SetPodNetworkStatusAnnotation(client *ClientInfo, podName string, podNamesp
 	if err != nil {
 		return logging.Errorf("SetNetworkStatus: %v", err)
 	}
-	if client == nil || client.Client == nil {
+	if client == nil {
 		if len(conf.Delegates) == 0 {
 			// No available kube client and no delegates, we can't do anything
 			return logging.Errorf("SetNetworkStatus: must have either Kubernetes config or delegates")
@@ -254,7 +268,8 @@ func parsePodNetworkAnnotation(podNetworks, defaultNamespace string) ([]*types.N
 func getKubernetesDelegate(client *ClientInfo, net *types.NetworkSelectionElement, confdir string, pod *v1.Pod, resourceMap map[string]*types.ResourceInfo) (*types.DelegateNetConf, map[string]*types.ResourceInfo, error) {
 
 	logging.Debugf("getKubernetesDelegate: %v, %v, %s, %v, %v", client, net, confdir, pod, resourceMap)
-	customResource, err := client.NetClient.NetworkAttachmentDefinitions(net.Namespace).Get(context.TODO(), net.Name, metav1.GetOptions{})
+
+	customResource, err := client.GetNetAttachDef(net.Namespace, net.Name)
 	if err != nil {
 		errMsg := fmt.Sprintf("cannot find a network-attachment-definition (%s) in namespace (%s): %v", net.Name, net.Namespace, err)
 		if client != nil {
@@ -388,82 +403,6 @@ func TryLoadPodDelegates(pod *v1.Pod, conf *types.NetConf, clientInfo *ClientInf
 	return 0, clientInfo, err
 }
 
-// InClusterK8sClient returns the `k8s.ClientInfo` struct to use to connect to
-// the k8s API.
-func InClusterK8sClient() (*ClientInfo, error) {
-	config, err := rest.InClusterConfig()
-	if err != nil {
-		return nil, err
-	}
-
-	logging.Debugf("InClusterK8sClient: in cluster config: %+v", config)
-	return NewClientInfo(config)
-}
-
-// GetK8sClient gets client info from kubeconfig
-func GetK8sClient(kubeconfig string, kubeClient *ClientInfo) (*ClientInfo, error) {
-	logging.Debugf("GetK8sClient: %s, %v", kubeconfig, kubeClient)
-	// If we get a valid kubeClient (eg from testcases) just return that
-	// one.
-	if kubeClient != nil {
-		return kubeClient, nil
-	}
-
-	var err error
-	var config *rest.Config
-
-	// Otherwise try to create a kubeClient from a given kubeConfig
-	if kubeconfig != "" {
-		// uses the current context in kubeconfig
-		config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
-		if err != nil {
-			return nil, logging.Errorf("GetK8sClient: failed to get context for the kubeconfig %v: %v", kubeconfig, err)
-		}
-	} else if os.Getenv("KUBERNETES_SERVICE_HOST") != "" && os.Getenv("KUBERNETES_SERVICE_PORT") != "" {
-		// Try in-cluster config where multus might be running in a kubernetes pod
-		config, err = rest.InClusterConfig()
-		if err != nil {
-			return nil, logging.Errorf("GetK8sClient: failed to get context for in-cluster kube config: %v", err)
-		}
-	} else {
-		// No kubernetes config; assume we shouldn't talk to Kube at all
-		return nil, nil
-	}
-
-	// Specify that we use gRPC
-	config.AcceptContentTypes = "application/vnd.kubernetes.protobuf,application/json"
-	config.ContentType = "application/vnd.kubernetes.protobuf"
-	// Set the config timeout to one minute.
-	config.Timeout = time.Minute
-
-	return NewClientInfo(config)
-}
-
-// NewClientInfo returns a `ClientInfo` from a configuration created from an
-// existing kubeconfig file.
-func NewClientInfo(config *rest.Config) (*ClientInfo, error) {
-	client, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		return nil, err
-	}
-
-	netclient, err := netclient.NewForConfig(config)
-	if err != nil {
-		return nil, err
-	}
-
-	broadcaster := record.NewBroadcaster()
-	broadcaster.StartLogging(klog.Infof)
-	broadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: client.CoreV1().Events("")})
-	recorder := broadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: "multus"})
-	return &ClientInfo{
-		Client:           client,
-		NetClient:        netclient,
-		EventBroadcaster: broadcaster,
-		EventRecorder:    recorder,
-	}, nil
-}
-
 // GetPodNetwork gets net-attach-def annotation from pod
 func GetPodNetwork(pod *v1.Pod) ([]*types.NetworkSelectionElement, error) {
 	logging.Debugf("GetPodNetwork: %v", pod)
@@ -542,6 +481,7 @@ func getNetDelegate(client *ClientInfo, pod *v1.Pod, netname, confdir, namespace
 		}
 
 		// option2) search CNI json config file, which has <netname> as CNI name, from confDir
+
 		configBytes, err = netutils.GetCNIConfigFromFile(netname, confdir)
 		if err == nil {
 			delegate, err := types.LoadDelegateNetConf(configBytes, nil, "", "")

@@ -15,6 +15,8 @@
 
 package types
 
+// disable dot-imports only for testing
+//revive:disable:dot-imports
 import (
 	"encoding/json"
 	"fmt"
@@ -26,7 +28,7 @@ import (
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/containernetworking/plugins/pkg/testutils"
 	netutils "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/utils"
-	testhelpers "gopkg.in/k8snetworkplumbingwg/multus-cni.v3/pkg/testing"
+	testhelpers "gopkg.in/k8snetworkplumbingwg/multus-cni.v4/pkg/testing"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"

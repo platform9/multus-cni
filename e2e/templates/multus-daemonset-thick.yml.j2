@@ -43,7 +43,9 @@ rules:
       - pods/status
     verbs:
       - get
+      - list
       - update
+      - watch
   - apiGroups:
       - ""
       - events.k8s.io
@@ -131,7 +133,6 @@ spec:
       containers:
       - name: kube-multus
         image: localhost:5000/multus:e2e
-        imagePullPolicy: Always
         command: [ "/usr/src/multus-cni/bin/multus-daemon" ]
         resources:
           requests:
@@ -157,6 +158,11 @@ spec:
         - name: multus-daemon-config
           mountPath: /etc/cni/net.d/multus.d
           readOnly: true
+        env:
+        - name: MULTUS_NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
       initContainers:
       - name: install-multus-shim
         image: localhost:5000/multus:e2e

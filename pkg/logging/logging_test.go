@@ -15,12 +15,14 @@
 
 package logging
 
+// disable dot-imports only for testing
+//revive:disable:dot-imports
 import (
 	"fmt"
 	"os"
 	"testing"
 
-	testutils "gopkg.in/k8snetworkplumbingwg/multus-cni.v3/pkg/testing"
+	testutils "gopkg.in/k8snetworkplumbingwg/multus-cni.v4/pkg/testing"
 	"gopkg.in/natefinch/lumberjack.v2"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -106,13 +108,13 @@ var _ = Describe("logging operations", func() {
 		Verbosef("foobar")
 		Expect(Errorf("foobar")).NotTo(BeNil())
 		Panicf("foobar")
-		logger.Filename = ""
+		logger = nil
 		loggingW = nil
 		err = os.RemoveAll(tmpDir)
 		Expect(err).NotTo(HaveOccurred())
 		// Revert the log variable to init
 		loggingW = nil
-		logger = &lumberjack.Logger{}
+		logger = nil
 	})
 
 	// Tests public getter

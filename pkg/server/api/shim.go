@@ -23,7 +23,7 @@ import (
 	"github.com/containernetworking/cni/pkg/skel"
 	cnitypes "github.com/containernetworking/cni/pkg/types"
 
-	"gopkg.in/k8snetworkplumbingwg/multus-cni.v3/pkg/logging"
+	"gopkg.in/k8snetworkplumbingwg/multus-cni.v4/pkg/logging"
 )
 
 // ShimNetConf for the SHIM cni config file written in json
@@ -65,7 +65,8 @@ func CmdCheck(args *skel.CmdArgs) error {
 func CmdDel(args *skel.CmdArgs) error {
 	_, _, err := postRequest(args)
 	if err != nil {
-		return logging.Errorf("CmdDel (shim): %v", err)
+		// No error in DEL (as of CNI spec)
+		logging.Errorf("CmdCheck (shim): %v", err)
 	}
 	return nil
 }
@@ -76,14 +77,20 @@ func postRequest(args *skel.CmdArgs) (*Response, string, error) {
 		return nil, "", fmt.Errorf("invalid CNI configuration passed to multus-shim: %w", err)
 	}
 
+	// check API readiness
+	if err := WaitUntilAPIReady(multusShimConfig.MultusSocketDir); err != nil {
+		return nil, multusShimConfig.CNIVersion, err
+	}
+
 	cniRequest, err := newCNIRequest(args)
 	if err != nil {
 		return nil, multusShimConfig.CNIVersion, err
 	}
 
-	body, err := DoCNI("http://dummy/cni", cniRequest, SocketPath(multusShimConfig.MultusSocketDir))
+	var body []byte
+	body, err = DoCNI("http://dummy/cni", cniRequest, SocketPath(multusShimConfig.MultusSocketDir))
 	if err != nil {
-		return nil, multusShimConfig.CNIVersion, err
+		return nil, multusShimConfig.CNIVersion, fmt.Errorf("%s: StdinData: %s", err.Error(), string(args.StdinData))
 	}
 
 	response := &Response{}

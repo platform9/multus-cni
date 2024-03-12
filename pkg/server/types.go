@@ -16,12 +16,17 @@ package server
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/containernetworking/cni/pkg/invoke"
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"gopkg.in/k8snetworkplumbingwg/multus-cni.v3/pkg/k8sclient"
+	"gopkg.in/k8snetworkplumbingwg/multus-cni.v4/pkg/k8sclient"
+
+	netdefinformer "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/informers/externalversions"
+	"k8s.io/client-go/informers/internalinterfaces"
+	"k8s.io/client-go/tools/cache"
 )
 
 const (
@@ -31,6 +36,8 @@ const (
 	DefaultMultusDaemonConfigFile = "/etc/cni/net.d/multus.d/daemon-config.json"
 	// DefaultMultusRunDir specifies default RunDir for multus
 	DefaultMultusRunDir = "/run/multus/"
+	// DefaultCertDuration specifies default duration for certs in per-node-certs config
+	DefaultCertDuration = 10 * time.Minute
 )
 
 // Metrics represents server's metrics.
@@ -42,19 +49,34 @@ type Metrics struct {
 // the CNI shim requests issued when a pod is added / removed.
 type Server struct {
 	http.Server
-	rundir       string
-	kubeclient   *k8sclient.ClientInfo
-	exec         invoke.Exec
-	serverConfig []byte
-	metrics      *Metrics
+	rundir                string
+	kubeclient            *k8sclient.ClientInfo
+	exec                  invoke.Exec
+	serverConfig          []byte
+	metrics               *Metrics
+	informerFactory       internalinterfaces.SharedInformerFactory
+	podInformer           cache.SharedIndexInformer
+	netdefInformerFactory netdefinformer.SharedInformerFactory
+	netdefInformer        cache.SharedIndexInformer
+
+	ignoreReadinessIndicator bool
+}
+
+// PerNodeCertificate for auto certificate generation for per node
+type PerNodeCertificate struct {
+	Enabled             bool   `json:"enabled,omitempty"`
+	BootstrapKubeconfig string `json:"bootstrapKubeconfig,omitempty"`
+	CertDir             string `json:"certDir,omitempty"`
+	CertDuration        string `json:"certDuration,omitempty"`
 }
 
 // ControllerNetConf for the controller cni configuration
 type ControllerNetConf struct {
-	ChrootDir   string `json:"chrootDir,omitempty"`
-	LogFile     string `json:"logFile"`
-	LogLevel    string `json:"logLevel"`
-	LogToStderr bool   `json:"logToStderr,omitempty"`
+	ChrootDir          string              `json:"chrootDir,omitempty"`
+	LogFile            string              `json:"logFile"`
+	LogLevel           string              `json:"logLevel"`
+	LogToStderr        bool                `json:"logToStderr,omitempty"`
+	PerNodeCertificate *PerNodeCertificate `json:"perNodeCertificate,omitempty"`
 
 	MetricsPort *int `json:"metricsPort,omitempty"`
 

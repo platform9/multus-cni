@@ -1,12 +1,14 @@
 package main
 
+// disable dot-imports only for testing
+//revive:disable:dot-imports
 import (
 	"fmt"
 	"os"
 	"testing"
 
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
+	. "github.com/onsi/ginkgo/v2" //nolint:golint
+	. "github.com/onsi/gomega"    //nolint:golint
 )
 
 func TestThinEntrypoint(t *testing.T) {
@@ -103,14 +105,15 @@ var _ = Describe("thin entrypoint testing", func() {
 		}`
 		Expect(os.WriteFile(fmt.Sprintf("%s/10-testcni.conf", multusAutoConfigDir), []byte(masterCNIConfig), 0755)).To(Succeed())
 
-		masterConfigPath, err := (&Options{
+		masterConfigPath, masterConfigHash, err := (&Options{
 			MultusAutoconfigDir:      multusAutoConfigDir,
 			CNIConfDir:               cniConfDir,
 			MultusKubeConfigFileHost: "/etc/foobar_kubeconfig",
-		}).createMultusConfig()
+		}).createMultusConfig(nil)
 		Expect(err).NotTo(HaveOccurred())
 
 		Expect(masterConfigPath).NotTo(Equal(""))
+		Expect(masterConfigHash).NotTo(Equal(""))
 
 		expectedResult := `{
         "cniVersion": "0.3.1",
@@ -151,14 +154,15 @@ var _ = Describe("thin entrypoint testing", func() {
 		}`
 		Expect(os.WriteFile(fmt.Sprintf("%s/10-testcni.conf", multusAutoConfigDir), []byte(masterCNIConfig), 0755)).To(Succeed())
 
-		masterConfigPath, err := (&Options{
+		masterConfigPath, masterConfigHash, err := (&Options{
 			MultusAutoconfigDir:      multusAutoConfigDir,
 			CNIConfDir:               cniConfDir,
 			MultusKubeConfigFileHost: "/etc/foobar_kubeconfig",
-		}).createMultusConfig()
+		}).createMultusConfig(nil)
 		Expect(err).NotTo(HaveOccurred())
 
 		Expect(masterConfigPath).NotTo(Equal(""))
+		Expect(masterConfigHash).NotTo(Equal(""))
 
 		expectedResult := `{
         "cniVersion": "0.3.1",
@@ -200,7 +204,7 @@ var _ = Describe("thin entrypoint testing", func() {
 		err = os.WriteFile(fmt.Sprintf("%s/10-testcni.conf", multusAutoConfigDir), []byte(masterCNIConfig), 0755)
 		Expect(err).NotTo(HaveOccurred())
 
-		masterConfigPath, err := (&Options{
+		masterConfigPath, masterConfigHash, err := (&Options{
 			MultusAutoconfigDir:      multusAutoConfigDir,
 			CNIConfDir:               cniConfDir,
 			MultusKubeConfigFileHost: "/etc/foobar_kubeconfig",
@@ -210,11 +214,13 @@ var _ = Describe("thin entrypoint testing", func() {
 			MultusLogLevel:           "DEBUG",
 			MultusLogFile:            "/tmp/foobar.log",
 			AdditionalBinDir:         "/tmp/add_bin_dir",
+			MultusCNIConfDir:         "/tmp/multus/net.d",
 			ReadinessIndicatorFile:   "/var/lib/foobar_indicator",
-		}).createMultusConfig()
+		}).createMultusConfig(nil)
 		Expect(err).NotTo(HaveOccurred())
 
 		Expect(masterConfigPath).NotTo(Equal(""))
+		Expect(masterConfigHash).NotTo(Equal(""))
 
 		expectedResult := `{
         "cniVersion": "0.3.1",
@@ -225,6 +231,7 @@ var _ = Describe("thin entrypoint testing", func() {
         "logLevel": "debug",
         "logFile": "/tmp/foobar.log",
         "binDir": "/tmp/add_bin_dir",
+        "cniConf": "/tmp/multus/net.d",
         "readinessindicatorfile": "/var/lib/foobar_indicator",
         "kubeconfig": "/etc/foobar_kubeconfig",
         "delegates": [
@@ -258,14 +265,15 @@ var _ = Describe("thin entrypoint testing", func() {
 		}`
 		Expect(os.WriteFile(fmt.Sprintf("%s/10-testcni.conf", multusAutoConfigDir), []byte(masterCNIConfig), 0755)).To(Succeed())
 
-		masterConfigPath, err := (&Options{
+		masterConfigPath, masterConfigHash, err := (&Options{
 			MultusAutoconfigDir:      multusAutoConfigDir,
 			CNIConfDir:               cniConfDir,
 			MultusKubeConfigFileHost: "/etc/foobar_kubeconfig",
-		}).createMultusConfig()
+		}).createMultusConfig(nil)
 		Expect(err).NotTo(HaveOccurred())
 
 		Expect(masterConfigPath).NotTo(Equal(""))
+		Expect(masterConfigHash).NotTo(Equal(""))
 
 		expectedResult :=
 			`{
@@ -308,14 +316,15 @@ var _ = Describe("thin entrypoint testing", func() {
 		}`
 		Expect(os.WriteFile(fmt.Sprintf("%s/10-testcni.conflist", multusAutoConfigDir), []byte(masterCNIConfig), 0755)).To(Succeed())
 
-		masterConfigPath, err := (&Options{
+		masterConfigPath, masterConfigHash, err := (&Options{
 			MultusAutoconfigDir:      multusAutoConfigDir,
 			CNIConfDir:               cniConfDir,
 			MultusKubeConfigFileHost: "/etc/foobar_kubeconfig",
-		}).createMultusConfig()
+		}).createMultusConfig(nil)
 		Expect(err).NotTo(HaveOccurred())
 
 		Expect(masterConfigPath).NotTo(Equal(""))
+		Expect(masterConfigHash).NotTo(Equal(""))
 
 		expectedResult :=
 			`{
@@ -358,7 +367,7 @@ var _ = Describe("thin entrypoint testing", func() {
 		}`
 		Expect(os.WriteFile(fmt.Sprintf("%s/10-testcni.conflist", multusAutoConfigDir), []byte(masterCNIConfig), 0755)).To(Succeed())
 
-		masterConfigPath, err := (&Options{
+		masterConfigPath, masterConfigHash, err := (&Options{
 			MultusAutoconfigDir:      multusAutoConfigDir,
 			CNIConfDir:               cniConfDir,
 			MultusKubeConfigFileHost: "/etc/foobar_kubeconfig",
@@ -368,11 +377,13 @@ var _ = Describe("thin entrypoint testing", func() {
 			MultusLogLevel:           "DEBUG",
 			MultusLogFile:            "/tmp/foobar.log",
 			AdditionalBinDir:         "/tmp/add_bin_dir",
+			MultusCNIConfDir:         "/tmp/multus/net.d",
 			ReadinessIndicatorFile:   "/var/lib/foobar_indicator",
-		}).createMultusConfig()
+		}).createMultusConfig(nil)
 		Expect(err).NotTo(HaveOccurred())
 
 		Expect(masterConfigPath).NotTo(Equal(""))
+		Expect(masterConfigHash).NotTo(Equal(""))
 
 		expectedResult :=
 			`{
@@ -385,6 +396,7 @@ var _ = Describe("thin entrypoint testing", func() {
         "logLevel": "debug",
         "logFile": "/tmp/foobar.log",
         "binDir": "/tmp/add_bin_dir",
+        "cniConf": "/tmp/multus/net.d",
         "readinessindicatorfile": "/var/lib/foobar_indicator",
         "kubeconfig": "/etc/foobar_kubeconfig",
         "delegates": [

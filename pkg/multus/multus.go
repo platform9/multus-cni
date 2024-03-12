@@ -39,15 +39,16 @@ import (
 	k8snet "k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/apimachinery/pkg/util/wait"
 
-	k8s "gopkg.in/k8snetworkplumbingwg/multus-cni.v3/pkg/k8sclient"
-	"gopkg.in/k8snetworkplumbingwg/multus-cni.v3/pkg/logging"
-	"gopkg.in/k8snetworkplumbingwg/multus-cni.v3/pkg/netutils"
-	"gopkg.in/k8snetworkplumbingwg/multus-cni.v3/pkg/types"
+	k8s "gopkg.in/k8snetworkplumbingwg/multus-cni.v4/pkg/k8sclient"
+	"gopkg.in/k8snetworkplumbingwg/multus-cni.v4/pkg/logging"
+	"gopkg.in/k8snetworkplumbingwg/multus-cni.v4/pkg/netutils"
+	"gopkg.in/k8snetworkplumbingwg/multus-cni.v4/pkg/types"
 )
 
 const (
-	shortPollDuration = 250 * time.Millisecond
-	shortPollTimeout  = 2500 * time.Millisecond
+	shortPollDuration    = 250 * time.Millisecond
+	informerPollDuration = 50 * time.Millisecond
+	shortPollTimeout     = 2500 * time.Millisecond
 )
 
 var (
@@ -56,11 +57,6 @@ var (
 	date          = "unknown date"
 	gitTreeState  = ""
 	releaseStatus = ""
-)
-
-var (
-	pollDuration = 1000 * time.Millisecond
-	pollTimeout  = 45 * time.Second
 )
 
 // PrintVersionString ...
@@ -369,11 +365,14 @@ func DelegateAdd(exec invoke.Exec, kubeClient *k8s.ClientInfo, pod *v1.Pod, dele
 	}
 
 	if pod != nil {
-		// send kubernetes events
-		if delegate.Name != "" {
-			kubeClient.Eventf(pod, v1.EventTypeNormal, "AddedInterface", "Add %s %v from %s", rt.IfName, ips, delegate.Name)
-		} else {
-			kubeClient.Eventf(pod, v1.EventTypeNormal, "AddedInterface", "Add %s %v", rt.IfName, ips)
+		// check Interfaces and IPs because some CNI plugin just return empty result
+		if res.Interfaces != nil || res.IPs != nil {
+			// send kubernetes events
+			if delegate.Name != "" {
+				kubeClient.Eventf(pod, v1.EventTypeNormal, "AddedInterface", "Add %s %v from %s", rt.IfName, ips, delegate.Name)
+			} else {
+				kubeClient.Eventf(pod, v1.EventTypeNormal, "AddedInterface", "Add %s %v", rt.IfName, ips)
+			}
 		}
 	} else {
 		// for further debug https://github.com/k8snetworkplumbingwg/multus-cni/issues/481
@@ -508,7 +507,7 @@ func isCriticalRequestRetriable(err error) bool {
 
 // GetPod retrieves Kubernetes Pod object from given namespace/name in k8sArgs (i.e. cni args)
 // GetPod also get pod UID, but it is not used to retrieve, but it is used for double check
-func GetPod(kubeClient *k8s.ClientInfo, k8sArgs *types.K8sArgs, warnOnly bool) (*v1.Pod, error) {
+func GetPod(kubeClient *k8s.ClientInfo, k8sArgs *types.K8sArgs, isDel bool) (*v1.Pod, error) {
 	if kubeClient == nil {
 		return nil, nil
 	}
@@ -517,31 +516,55 @@ func GetPod(kubeClient *k8s.ClientInfo, k8sArgs *types.K8sArgs, warnOnly bool) (
 	podName := string(k8sArgs.K8S_POD_NAME)
 	podUID := string(k8sArgs.K8S_POD_UID)
 
-	pod, err := kubeClient.GetPod(podNamespace, podName)
-	if err != nil {
-		// in case of a retriable error, retry 10 times with 0.25 sec interval
-		if isCriticalRequestRetriable(err) {
-			waitErr := wait.PollImmediate(shortPollDuration, shortPollTimeout, func() (bool, error) {
-				pod, err = kubeClient.GetPod(podNamespace, podName)
-				return pod != nil, err
-			})
-			// retry failed, then return error with retry out
-			if waitErr != nil {
-				return nil, cmdErr(k8sArgs, "error waiting for pod: %v", err)
-			}
-		} else if warnOnly && errors.IsNotFound(err) {
-			// If not found, proceed to remove interface with cache
+	// Keep track of how long getting the pod takes
+	logging.Debugf("GetPod for [%s/%s] starting", podNamespace, podName)
+	start := time.Now()
+	defer func() {
+		logging.Debugf("GetPod for [%s/%s] took %v", podNamespace, podName, time.Since(start))
+	}()
+
+	// Use a fairly long 0.25 sec interval so we don't hammer the apiserver
+	pollDuration := shortPollDuration
+	retryOnNotFound := func(error) bool {
+		return false
+	}
+
+	if kubeClient.PodInformer != nil {
+		logging.Debugf("GetPod for [%s/%s] will use informer cache", podNamespace, podName)
+		// Use short retry intervals with the informer since it's a local cache
+		pollDuration = informerPollDuration
+		// Retry NotFound on ADD since the cache may be a bit behind the apiserver
+		retryOnNotFound = func(e error) bool {
+			return !isDel && errors.IsNotFound(e)
+		}
+	}
+
+	var pod *v1.Pod
+	if err := wait.PollImmediate(pollDuration, shortPollTimeout, func() (bool, error) {
+		var getErr error
+		pod, getErr = kubeClient.GetPod(podNamespace, podName)
+		if isCriticalRequestRetriable(getErr) || retryOnNotFound(getErr) {
+			return false, nil
+		}
+		return pod != nil, getErr
+	}); err != nil {
+		if isDel && errors.IsNotFound(err) {
+			// On DEL pod may already be gone from apiserver/informer
 			return nil, nil
-		} else {
-			// Other case, return error
-			return nil, cmdErr(k8sArgs, "error getting pod: %v", err)
+		}
+		// Try one more time to get the pod directly from the apiserver;
+		// TODO: figure out why static pods don't show up via the informer
+		// and always hit this case.
+		pod, err = kubeClient.GetPod(podNamespace, podName)
+		if err != nil {
+			return nil, cmdErr(k8sArgs, "error waiting for pod: %v", err)
 		}
 	}
 
 	// In case of static pod, UID through kube api is different because of mirror pod, hence it is expected.
 	if podUID != "" && string(pod.UID) != podUID && !k8s.IsStaticPod(pod) {
 		msg := fmt.Sprintf("expected pod UID %q but got %q from Kube API", podUID, pod.UID)
-		if warnOnly {
+		if isDel {
 			// On CNI DEL we just operate on the cache when these mismatch, we don't error out.
 			// For example: stateful sets namespace/name can remain the same while podUID changes.
 			logging.Verbosef("warning: %s", msg)
@@ -572,11 +595,7 @@ func CmdAdd(args *skel.CmdArgs, exec invoke.Exec, kubeClient *k8s.ClientInfo) (c
 	}
 
 	if n.ReadinessIndicatorFile != "" {
-		err := wait.PollImmediate(pollDuration, pollTimeout, func() (bool, error) {
-			_, err := os.Stat(n.ReadinessIndicatorFile)
-			return err == nil, nil
-		})
-		if err != nil {
+		if err := types.GetReadinessIndicatorFile(n.ReadinessIndicatorFile); err != nil {
 			return nil, cmdErr(k8sArgs, "have you checked that your default network is ready? still waiting for readinessindicatorfile @ %v. pollimmediate error: %v", n.ReadinessIndicatorFile, err)
 		}
 	}
@@ -636,69 +655,78 @@ func CmdAdd(args *skel.CmdArgs, exec invoke.Exec, kubeClient *k8s.ClientInfo) (c
 			return nil, cmdPluginErr(k8sArgs, netName, "error adding container to network %q: %v", netName, err)
 		}
 
-		// Remove gateway from routing table if the gateway is not used
-		deleteV4gateway := false
-		deleteV6gateway := false
-		adddefaultgateway := false
-		if delegate.IsFilterV4Gateway {
-			deleteV4gateway = true
-			logging.Debugf("Marked interface %v for v4 gateway deletion", ifName)
-		} else {
-			// Otherwise, determine if this interface now gets our default route.
-			// According to
-			// https://docs.google.com/document/d/1Ny03h6IDVy_e_vmElOqR7UdTPAG_RNydhVE1Kx54kFQ (4.1.2.1.9)
-			// the list can be empty; if it is, we'll assume the CNI's config for the default gateway holds,
-			// else we'll update the defaultgateway to the one specified.
-			if delegate.GatewayRequest != nil && len(*delegate.GatewayRequest) != 0 {
-				deleteV4gateway = true
-				adddefaultgateway = true
-				logging.Debugf("Detected gateway override on interface %v to %v", ifName, delegate.GatewayRequest)
-			}
-		}
-
-		if delegate.IsFilterV6Gateway {
-			deleteV6gateway = true
-			logging.Debugf("Marked interface %v for v6 gateway deletion", ifName)
-		} else {
-			// Otherwise, determine if this interface now gets our default route.
-			// According to
-			// https://docs.google.com/document/d/1Ny03h6IDVy_e_vmElOqR7UdTPAG_RNydhVE1Kx54kFQ (4.1.2.1.9)
-			// the list can be empty; if it is, we'll assume the CNI's config for the default gateway holds,
-			// else we'll update the defaultgateway to the one specified.
-			if delegate.GatewayRequest != nil && len(*delegate.GatewayRequest) != 0 {
-				deleteV6gateway = true
-				adddefaultgateway = true
-				logging.Debugf("Detected gateway override on interface %v to %v", ifName, delegate.GatewayRequest)
-			}
-		}
-
-		// Remove gateway if `default-route` network selection is specified
-		if deleteV4gateway || deleteV6gateway {
-			err = netutils.DeleteDefaultGW(args.Netns, ifName)
-			if err != nil {
-				return nil, cmdErr(k8sArgs, "error deleting default gateway: %v", err)
-			}
-			err = netutils.DeleteDefaultGWCache(n.CNIDir, rt, netName, ifName, deleteV4gateway, deleteV6gateway)
-			if err != nil {
-				return nil, cmdErr(k8sArgs, "error deleting default gateway in cache: %v", err)
-			}
-		}
-
-		// Here we'll set the default gateway which specified in `default-route` network selection
-		if adddefaultgateway {
-			err = netutils.SetDefaultGW(args.Netns, ifName, *delegate.GatewayRequest)
-			if err != nil {
-				return nil, cmdErr(k8sArgs, "error setting default gateway: %v", err)
-			}
-			err = netutils.AddDefaultGWCache(n.CNIDir, rt, netName, ifName, *delegate.GatewayRequest)
-			if err != nil {
-				return nil, cmdErr(k8sArgs, "error setting default gateway in cache: %v", err)
-			}
-		}
-
 		// Master plugin result is always used if present
 		if delegate.MasterPlugin || result == nil {
 			result = tmpResult
+		}
+
+		res, err := cni100.NewResultFromResult(tmpResult)
+		if err != nil {
+			logging.Errorf("CmdAdd: failed to read result: %v, but proceed", err)
+		}
+
+		// check Interfaces and IPs because some CNI plugin does not create any interface
+		// and just returns empty result
+		if res != nil && (res.Interfaces != nil || res.IPs != nil) {
+			// Remove gateway from routing table if the gateway is not used
+			deleteV4gateway := false
+			deleteV6gateway := false
+			adddefaultgateway := false
+			if delegate.IsFilterV4Gateway {
+				deleteV4gateway = true
+				logging.Debugf("Marked interface %v for v4 gateway deletion", ifName)
+			} else {
+				// Otherwise, determine if this interface now gets our default route.
+				// According to
+				// https://docs.google.com/document/d/1Ny03h6IDVy_e_vmElOqR7UdTPAG_RNydhVE1Kx54kFQ (4.1.2.1.9)
+				// the list can be empty; if it is, we'll assume the CNI's config for the default gateway holds,
+				// else we'll update the defaultgateway to the one specified.
+				if delegate.GatewayRequest != nil && len(*delegate.GatewayRequest) != 0 {
+					deleteV4gateway = true
+					adddefaultgateway = true
+					logging.Debugf("Detected gateway override on interface %v to %v", ifName, delegate.GatewayRequest)
+				}
+			}
+
+			if delegate.IsFilterV6Gateway {
+				deleteV6gateway = true
+				logging.Debugf("Marked interface %v for v6 gateway deletion", ifName)
+			} else {
+				// Otherwise, determine if this interface now gets our default route.
+				// According to
+				// https://docs.google.com/document/d/1Ny03h6IDVy_e_vmElOqR7UdTPAG_RNydhVE1Kx54kFQ (4.1.2.1.9)
+				// the list can be empty; if it is, we'll assume the CNI's config for the default gateway holds,
+				// else we'll update the defaultgateway to the one specified.
+				if delegate.GatewayRequest != nil && len(*delegate.GatewayRequest) != 0 {
+					deleteV6gateway = true
+					adddefaultgateway = true
+					logging.Debugf("Detected gateway override on interface %v to %v", ifName, delegate.GatewayRequest)
+				}
+			}
+
+			// Remove gateway if `default-route` network selection is specified
+			if deleteV4gateway || deleteV6gateway {
+				err = netutils.DeleteDefaultGW(args.Netns, ifName)
+				if err != nil {
+					return nil, cmdErr(k8sArgs, "error deleting default gateway: %v", err)
+				}
+				err = netutils.DeleteDefaultGWCache(n.CNIDir, rt, netName, ifName, deleteV4gateway, deleteV6gateway)
+				if err != nil {
+					return nil, cmdErr(k8sArgs, "error deleting default gateway in cache: %v", err)
+				}
+			}
+
+			// Here we'll set the default gateway which specified in `default-route` network selection
+			if adddefaultgateway {
+				err = netutils.SetDefaultGW(args.Netns, ifName, *delegate.GatewayRequest)
+				if err != nil {
+					return nil, cmdErr(k8sArgs, "error setting default gateway: %v", err)
+				}
+				err = netutils.AddDefaultGWCache(n.CNIDir, rt, netName, ifName, *delegate.GatewayRequest)
+				if err != nil {
+					return nil, cmdErr(k8sArgs, "error setting default gateway in cache: %v", err)
+				}
+			}
 		}
 
 		// Read devInfo from CNIDeviceInfoFile if it exists so
@@ -776,21 +804,7 @@ func CmdDel(args *skel.CmdArgs, exec invoke.Exec, kubeClient *k8s.ClientInfo) er
 		return err
 	}
 
-	skipStatusUpdate := false
 	netns, err := ns.GetNS(args.Netns)
-	if err != nil {
-		// if NetNs is passed down by the Cloud Orchestration Engine, or if it called multiple times
-		// so don't return an error if the device is already removed.
-		// https://github.com/kubernetes/kubernetes/issues/43014#issuecomment-287164444
-		_, ok := err.(ns.NSPathNotExistErr)
-		skipStatusUpdate = true
-		if ok {
-			logging.Debugf("CmdDel: WARNING netns may not exist, netns: %s, err: %s", args.Netns, err)
-		} else {
-			logging.Debugf("CmdDel: WARNING failed to open netns %q: %v", netns, err)
-		}
-	}
-
 	if netns != nil {
 		defer netns.Close()
 	}
@@ -801,12 +815,13 @@ func CmdDel(args *skel.CmdArgs, exec invoke.Exec, kubeClient *k8s.ClientInfo) er
 	}
 
 	if in.ReadinessIndicatorFile != "" {
-		err := wait.PollImmediate(pollDuration, pollTimeout, func() (bool, error) {
-			_, err := os.Stat(in.ReadinessIndicatorFile)
-			return err == nil, nil
-		})
+		readinessfileexists, err := types.ReadinessIndicatorExistsNow(in.ReadinessIndicatorFile)
 		if err != nil {
-			return cmdErr(k8sArgs, "PollImmediate error waiting for ReadinessIndicatorFile (on del): %v", err)
+			return cmdErr(k8sArgs, "error checking readinessindicatorfile on CNI DEL @ %v: %v", in.ReadinessIndicatorFile, err)
+		}
+
+		if !readinessfileexists {
+			logging.Verbosef("warning: readinessindicatorfile @ %v does not exist on CNI DEL", in.ReadinessIndicatorFile)
 		}
 	}
 
@@ -819,8 +834,6 @@ func CmdDel(args *skel.CmdArgs, exec invoke.Exec, kubeClient *k8s.ClientInfo) er
 	if err != nil {
 		// GetPod may be failed but just do print error in its log and continue to delete
 		logging.Errorf("Multus: GetPod failed: %v, but continue to delete", err)
-		// skip status update because k8s api seems to be stucked
-		skipStatusUpdate = true
 	}
 
 	// Read the cache to get delegates json for the pod
@@ -882,21 +895,6 @@ func CmdDel(args *skel.CmdArgs, exec invoke.Exec, kubeClient *k8s.ClientInfo) er
 				// error happen but continue to delete
 				logging.Errorf("Multus: failed to marshal delegate %q config: %v", v.Name, err)
 			}
-		}
-	}
-
-	// unset the network status annotation in apiserver, only in case Multus as kubeconfig
-	if kubeClient != nil {
-		if !skipStatusUpdate {
-			if !types.CheckSystemNamespaces(string(k8sArgs.K8S_POD_NAMESPACE), in.SystemNamespaces) {
-				err := k8s.SetNetworkStatus(kubeClient, k8sArgs, nil, in)
-				if err != nil {
-					// error happen but continue to delete
-					logging.Errorf("Multus: error unsetting the networks status: %v", err)
-				}
-			}
-		} else {
-			logging.Debugf("WARNING: Unset SetNetworkStatus skipped")
 		}
 	}
 

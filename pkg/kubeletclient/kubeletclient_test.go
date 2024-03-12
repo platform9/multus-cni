@@ -15,6 +15,8 @@
 
 package kubeletclient
 
+// disable dot-imports only for testing
+//revive:disable:dot-imports
 import (
 	"context"
 	"fmt"
@@ -33,7 +35,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sTypes "k8s.io/apimachinery/pkg/types"
 
-	mtypes "gopkg.in/k8snetworkplumbingwg/multus-cni.v3/pkg/types"
+	mtypes "gopkg.in/k8snetworkplumbingwg/multus-cni.v4/pkg/types"
 	podresourcesapi "k8s.io/kubelet/pkg/apis/podresources/v1"
 )
 
@@ -50,6 +52,11 @@ type fakeResourceServer struct {
 // TODO: This is stub code for test, but we may need to change for the testing we use this API in the future...
 func (m *fakeResourceServer) GetAllocatableResources(_ context.Context, _ *podresourcesapi.AllocatableResourcesRequest) (*podresourcesapi.AllocatableResourcesResponse, error) {
 	return &podresourcesapi.AllocatableResourcesResponse{}, nil
+}
+
+// TODO: This is stub code for test, but we may need to change for the testing we use this API in the future...
+func (m *fakeResourceServer) Get(_ context.Context, _ *podresourcesapi.GetPodResourcesRequest) (*podresourcesapi.GetPodResourcesResponse, error) {
+	return &podresourcesapi.GetPodResourcesResponse{}, nil
 }
 
 func (m *fakeResourceServer) List(_ context.Context, _ *podresourcesapi.ListPodResourcesRequest) (*podresourcesapi.ListPodResourcesResponse, error) {
