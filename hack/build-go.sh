@@ -21,7 +21,6 @@ if [ -z "$VERSION" ]; then
 fi
 DATE=$(date -u -d "@${SOURCE_DATE_EPOCH:-$(date +%s)}" --iso-8601=seconds)
 COMMIT=${COMMIT:-$(git rev-parse --verify HEAD)}
-LDFLAGS="-X main.version=${VERSION:-master} -X main.commit=${COMMIT} -X main.date=${DATE}"
 export CGO_ENABLED=0
 
 # this if... will be removed when gomodules goes default
@@ -40,15 +39,15 @@ if [ "$GO111MODULE" == "off" ]; then
 	export GO15VENDOREXPERIMENT=1
 	export GOBIN=${PWD}/bin
 	export GOPATH=${PWD}/gopath
-	go build -o ${PWD}/bin/multus -tags no_openssl -ldflags "${LDFLAGS}" "$@" ${REPO_PATH}/cmd
+	go build -o ${PWD}/bin/multus -tags no_openssl -buildvcs=false "$@" ${REPO_PATH}/cmd
 else
 	# build with go modules
 	export GO111MODULE=on
-	BUILD_ARGS=(-o ${DEST_DIR}/multus -tags no_openssl)
+	BUILD_ARGS=(-o ${DEST_DIR}/multus -tags no_openssl  -buildvcs=false)
 	if [ -n "$MODMODE" ]; then
 		BUILD_ARGS+=(-mod "$MODMODE")
 	fi
 
 	echo "Building plugins"
-	go build ${BUILD_ARGS[*]} -ldflags "${LDFLAGS}" "$@" ./cmd
+	go build ${BUILD_ARGS[*]} "$@" ./cmd
 fi
