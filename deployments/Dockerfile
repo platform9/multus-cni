@@ -15,7 +15,7 @@ COPY --from=build /usr/src/multus-cni/LICENSE /usr/src/multus-cni/LICENSE
 
 WORKDIR /
 
-RUN apk update && apk add --no-cache yum
+RUN apk update
 
 ADD ./images/entrypoint.sh /
 ENTRYPOINT ["/entrypoint.sh"]
