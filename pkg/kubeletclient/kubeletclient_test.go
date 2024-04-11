@@ -29,9 +29,14 @@ type fakeResourceServer struct {
 	server *grpc.Server
 }
 
-//TODO: This is stub code for test, but we may need to change for the testing we use this API in the future...
-func (m *fakeResourceServer) GetAllocatableResources(ctx context.Context, req *podresourcesapi.AllocatableResourcesRequest) (*podresourcesapi.AllocatableResourcesResponse, error) {
+// TODO: This is stub code for test, but we may need to change for the testing we use this API in the future...
+func (m *fakeResourceServer) GetAllocatableResources(_ context.Context, _ *podresourcesapi.AllocatableResourcesRequest) (*podresourcesapi.AllocatableResourcesResponse, error) {
 	return &podresourcesapi.AllocatableResourcesResponse{}, nil
+}
+
+// TODO: This is stub code for test, but we may need to change for the testing we use this API in the future...
+func (m *fakeResourceServer) Get(_ context.Context, _ *podresourcesapi.GetPodResourcesRequest) (*podresourcesapi.GetPodResourcesResponse, error) {
+	return &podresourcesapi.GetPodResourcesResponse{}, nil
 }
 
 func (m *fakeResourceServer) List(ctx context.Context, req *podresourcesapi.ListPodResourcesRequest) (*podresourcesapi.ListPodResourcesResponse, error) {
@@ -69,6 +74,7 @@ func TestKubeletclient(t *testing.T) {
 }
 
 var testKubeletSocket string
+
 func setUp() error {
 	tempSocketDir, err := ioutil.TempDir("", "kubelet-resource-client")
 	if err != nil {
