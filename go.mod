@@ -1,6 +1,6 @@
 module gopkg.in/k8snetworkplumbingwg/multus-cni.v3
 
-go 1.21
+go 1.17
 
 require (
 	github.com/containernetworking/cni v0.8.1
