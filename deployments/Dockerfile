@@ -3,6 +3,7 @@ FROM centos:centos7 as build
 
 # Add everything
 ADD . /usr/src/multus-cni
+RUN sed -i 's|^mirrorlist=|#mirrorlist=|g' /etc/yum.repos.d/CentOS-Base.repo && sed -i 's|^#baseurl=http://mirror.centos.org/centos/$releasever/|baseurl=http://archive.kernel.org/centos-vault/7.9.2009/|g' /etc/yum.repos.d/CentOS-Base.repo
 RUN yum update -y
 ENV INSTALL_PKGS "git golang-1.17.13-0.el7.x86_64"
 RUN rpm --import https://mirror.go-repo.io/centos/RPM-GPG-KEY-GO-REPO && \
@@ -16,6 +17,7 @@ FROM centos:centos7
 LABEL org.opencontainers.image.source https://github.com/k8snetworkplumbingwg/multus-cni
 COPY --from=build /usr/src/multus-cni /usr/src/multus-cni
 WORKDIR /
+RUN sed -i 's|^mirrorlist=|#mirrorlist=|g' /etc/yum.repos.d/CentOS-Base.repo && sed -i 's|^#baseurl=http://mirror.centos.org/centos/$releasever/|baseurl=http://archive.kernel.org/centos-vault/7.9.2009/|g' /etc/yum.repos.d/CentOS-Base.repo
 RUN yum update -y
 
 ADD ./images/entrypoint.sh /
