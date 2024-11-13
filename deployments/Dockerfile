@@ -1,4 +1,4 @@
-FROM alpine:3.19 as build
+FROM alpine:3.20 as build
 
 ADD . /usr/src/multus-cni
 RUN apk add --no-cache git wget bash coreutils
@@ -11,7 +11,7 @@ ENV PATH="$PATH:/usr/local/go/bin"
 RUN cd /usr/src/multus-cni && \
     ./hack/build-go.sh
 
-FROM alpine:3.19
+FROM alpine:3.20
 LABEL org.opencontainers.image.source https://github.com/k8snetworkplumbingwg/multus-cni
 COPY --from=build /usr/src/multus-cni /usr/src/multus-cni
 WORKDIR /

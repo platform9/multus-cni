@@ -1,5 +1,5 @@
 # This Dockerfile is used to build the image available on DockerHub
-FROM alipne:3.19 as build
+FROM alipne:3.20 as build
 
 # Add everything
 ADD . /usr/src/multus-cni
