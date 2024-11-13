@@ -2,7 +2,7 @@ FROM alpine:3.20 as build
 
 ADD . /usr/src/multus-cni
 RUN apk add --no-cache git wget bash coreutils
-ENV GO_VERSION 1.23.1
+ENV GO_VERSION 1.23.3
 RUN wget https://dl.google.com/go/go$GO_VERSION.linux-amd64.tar.gz && \
     tar -C /usr/local -xzf go$GO_VERSION.linux-amd64.tar.gz && \
     rm go$GO_VERSION.linux-amd64.tar.gz

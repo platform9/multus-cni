@@ -7,6 +7,8 @@ ADD . /usr/src/multus-cni
 ENV GOARCH "ppc64le"
 ENV GOOS "linux"
 
+ENV GO_VERSION 1.23.3 
+
 ENV INSTALL_PKGS "git wget bash coreutils"
 RUN wget https://dl.google.com/go/go$GO_VERSION.linux-amd64.tar.gz && \
     tar -C /usr/local -xzf go$GO_VERSION.linux-amd64.tar.gz && \
