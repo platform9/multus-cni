@@ -50,5 +50,5 @@ else
 	fi
 
 	echo "Building plugins"
-	go build ${BUILD_ARGS[*]} -ldflags "${LDFLAGS}" "$@" ./cmd
+	go build ${BUILD_ARGS[*]} -buildvcs=false -ldflags "${LDFLAGS}" "$@" ./cmd
 fi
