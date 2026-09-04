@@ -641,6 +641,39 @@ var _ = Describe("netutil cnicache function testing", func() {
 			Expect(len(result.Result.Routes)).To(Equal(5))
 		})
 
+		It("verify ipv4 default gateway from single routes is removed/added from CNI 1.0.0 results", func() {
+			origResult := []byte(`{
+  "kind": "cniCacheV1",
+  "result": {
+    "cniVersion": "1.0.0",
+    "dns": {},
+    "interfaces": [
+      {
+        "mac": "0a:c2:e6:3d:45:17",
+        "name": "net1",
+        "sandbox": "/run/netns/bb74fcb9-989a-4589-b2df-ddd0384a8ee5"
+      }
+    ],
+    "ips": [
+      {
+        "address": "10.1.1.103/24",
+        "interface": 0
+      }
+    ],
+    "routes": [
+      {
+        "dst": "0.0.0.0/0",
+        "gw": "10.1.1.1"
+      }
+    ]
+  }
+}`)
+			newResult1, err := deleteDefaultGWCacheBytes(origResult, true, false)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = addDefaultGWCacheBytes(newResult1, []net.IP{net.ParseIP("10.1.1.1")})
+			Expect(err).NotTo(HaveOccurred())
+		})
+
 		It("verify ipv6 default gateway is removed from CNI 1.0.0 results", func() {
 			origResult := []byte(`{
   "kind": "cniCacheV1",
@@ -711,6 +744,39 @@ var _ = Describe("netutil cnicache function testing", func() {
 			result := CNICacheResult100{}
 			Expect(json.Unmarshal(newResult, &result)).NotTo(HaveOccurred())
 			Expect(len(result.Result.Routes)).To(Equal(5))
+		})
+
+		It("verify ipv6 default gateway from single routes is removed/added from CNI 1.0.0 results", func() {
+			origResult := []byte(`{
+  "kind": "cniCacheV1",
+  "result": {
+    "cniVersion": "1.0.0",
+    "dns": {},
+    "interfaces": [
+      {
+        "mac": "0a:c2:e6:3d:45:17",
+        "name": "net1",
+        "sandbox": "/run/netns/bb74fcb9-989a-4589-b2df-ddd0384a8ee5"
+      }
+    ],
+    "ips": [
+      {
+        "address": "10::1:1:103/64",
+        "interface": 0
+      }
+    ],
+    "routes": [
+      {
+        "dst": "::0/0",
+        "gw": "10::1:1:1"
+      }
+    ]
+  }
+}`)
+			newResult1, err := deleteDefaultGWCacheBytes(origResult, false, true)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = addDefaultGWCacheBytes(newResult1, []net.IP{net.ParseIP("10::1:1:1")})
+			Expect(err).NotTo(HaveOccurred())
 		})
 
 		It("verify ipv4 default gateway is added to CNI 0.1.0/0.2.0 results without routes", func() {
@@ -1441,5 +1507,35 @@ var _ = Describe("other function unit testing", func() {
 		routeJSON, err := json.Marshal(newRoute)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(routeJSON).Should(MatchJSON(`[{"dst":"10.1.1.0/24"}]`))
+	})
+
+	It("supports gateway result updates for cniVersion 1.1.0", func() {
+		deleteInput := map[string]interface{}{
+			"cniVersion": "1.1.0",
+			"routes": []interface{}{
+				map[string]interface{}{"dst": "0.0.0.0/0", "gw": "10.1.1.1"},
+			},
+		}
+		updatedDeleteResult, err := deleteDefaultGWResult(deleteInput, true, false)
+		Expect(err).NotTo(HaveOccurred())
+		_, hasRoutes := updatedDeleteResult["routes"]
+		Expect(hasRoutes).To(BeFalse())
+
+		addInput := map[string]interface{}{
+			"cniVersion": "1.1.0",
+		}
+		updatedAddResult, err := addDefaultGWResult(addInput, []net.IP{net.ParseIP("10.1.1.1")})
+		Expect(err).NotTo(HaveOccurred())
+		routes, ok := updatedAddResult["routes"].([]interface{})
+		Expect(ok).To(BeTrue())
+		Expect(routes).To(HaveLen(1))
+	})
+
+	It("rejects unsupported pre-1.0.0 cniVersion", func() {
+		addInput := map[string]interface{}{
+			"cniVersion": "0.9.0",
+		}
+		_, err := addDefaultGWResult(addInput, []net.IP{net.ParseIP("10.1.1.1")})
+		Expect(err).To(MatchError("not supported version: 0.9.0"))
 	})
 })

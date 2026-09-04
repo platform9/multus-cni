@@ -17,11 +17,12 @@ package types
 
 import (
 	"net"
+	"sort"
 
-	"gopkg.in/k8snetworkplumbingwg/multus-cni.v4/pkg/logging"
-
+	"github.com/containernetworking/cni/libcni"
 	"github.com/containernetworking/cni/pkg/types"
 	cni100 "github.com/containernetworking/cni/pkg/types/100"
+	"gopkg.in/k8snetworkplumbingwg/multus-cni.v4/pkg/logging"
 	v1 "k8s.io/api/core/v1"
 )
 
@@ -57,6 +58,7 @@ type NetConf struct {
 	NamespaceIsolation       bool     `json:"namespaceIsolation"`
 	RawNonIsolatedNamespaces string   `json:"globalNamespaces"`
 	NonIsolatedNamespaces    []string `json:"-"`
+	AuxiliaryCNIChainName    string   `json:"auxiliaryCNIChainName,omitempty"`
 
 	// Option to set system namespaces (to avoid to add defaultNetworks)
 	SystemNamespaces []string `json:"systemNamespaces"`
@@ -99,6 +101,7 @@ type BandwidthEntry struct {
 type DelegateNetConf struct {
 	Conf                  types.NetConf
 	ConfList              types.NetConfList
+	CNINetworkConfigList  libcni.NetworkConfigList `json:"-"` // only used internal housekeeping
 	Name                  string
 	IfnameRequest         string          `json:"ifnameRequest,omitempty"`
 	MacRequest            string          `json:"macRequest,omitempty"`
@@ -174,6 +177,18 @@ type K8sArgs struct {
 type ResourceInfo struct {
 	Index     int
 	DeviceIDs []string
+}
+
+// CopyAndSortDeviceIDs returns a sorted copy of ids. Callers use this to
+// stabilize order within one container's allocation without mutating kubelet
+// state or reordering devices across containers.
+func CopyAndSortDeviceIDs(ids []string) []string {
+	if ids == nil {
+		return nil
+	}
+	out := append([]string(nil), ids...)
+	sort.Strings(out)
+	return out
 }
 
 // ResourceClient provides a kubelet Pod resource handle

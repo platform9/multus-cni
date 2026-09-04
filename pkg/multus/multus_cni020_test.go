@@ -26,10 +26,8 @@ import (
 	types020 "github.com/containernetworking/cni/pkg/types/020"
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/containernetworking/plugins/pkg/testutils"
-	"gopkg.in/k8snetworkplumbingwg/multus-cni.v4/pkg/k8sclient"
 	"gopkg.in/k8snetworkplumbingwg/multus-cni.v4/pkg/logging"
 	testhelpers "gopkg.in/k8snetworkplumbingwg/multus-cni.v4/pkg/testing"
-	"gopkg.in/k8snetworkplumbingwg/multus-cni.v4/pkg/types"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
 
@@ -42,20 +40,6 @@ var _ = Describe("multus operations", func() {
 		meme := []byte(`meme`)
 		err := saveScratchNetConf("123456789", "", meme)
 		Expect(err).To(HaveOccurred())
-	})
-
-	It("fails to delete delegates with bad filepath", func() {
-		err := deleteDelegates("123456789", "bad!file!~?Path$^")
-		Expect(err).To(HaveOccurred())
-	})
-
-	It("delete delegates given good filepath", func() {
-		os.MkdirAll("/opt/cni/bin", 0755)
-		d1 := []byte("blah")
-		os.WriteFile("/opt/cni/bin/123456789", d1, 0644)
-
-		err := deleteDelegates("123456789", "/opt/cni/bin")
-		Expect(err).NotTo(HaveOccurred())
 	})
 })
 
@@ -101,7 +85,7 @@ var _ = Describe("multus operations cniVersion 0.2.0 config", func() {
 			StdinData: []byte(`{
 	    "name": "node-cni-network",
 	    "type": "multus",
-	    "defaultnetworkfile": "/tmp/foo.multus.conf",
+	    "readinessindicatorfile": "/tmp/foo.multus.conf",
 	    "defaultnetworkwaitseconds": 3,
 	    "delegates": [{
 	        "name": "weave1",
@@ -164,7 +148,7 @@ var _ = Describe("multus operations cniVersion 0.2.0 config", func() {
 			StdinData: []byte(`{
 	    "name": "node-cni-network",
 	    "type": "multus",
-	    "defaultnetworkfile": "/tmp/foo.multus.conf",
+	    "readinessindicatorfile": "/tmp/foo.multus.conf",
 	    "defaultnetworkwaitseconds": 3,
 	    "delegates": [{
 	        "name": "weave1",
@@ -225,7 +209,7 @@ var _ = Describe("multus operations cniVersion 0.2.0 config", func() {
 			StdinData: []byte(`{
 	    "name": "node-cni-network",
 	    "type": "multus",
-	    "defaultnetworkfile": "/tmp/foo.multus.conf",
+	    "readinessindicatorfile": "/tmp/foo.multus.conf",
 	    "defaultnetworkwaitseconds": 3,
 	    "delegates": [{
 	        "name": "weave1",
@@ -279,7 +263,7 @@ var _ = Describe("multus operations cniVersion 0.2.0 config", func() {
 			StdinData: []byte(`{
 	    "name": "node-cni-network",
 	    "type": "multus",
-	    "defaultnetworkfile": "/tmp/foo.multus.conf",
+	    "readinessindicatorfile": "/tmp/foo.multus.conf",
 	    "defaultnetworkwaitseconds": 3,
 	    "delegates": [{
 	        "name": "weave1",
@@ -346,7 +330,7 @@ var _ = Describe("multus operations cniVersion 0.2.0 config", func() {
 			StdinData: []byte(fmt.Sprintf(`{
 	    "name": "node-cni-network",
 	    "type": "multus",
-	    "defaultnetworkfile": "/tmp/foo.multus.conf",
+	    "readinessindicatorfile": "/tmp/foo.multus.conf",
 	    "defaultnetworkwaitseconds": 3,
 	    "delegates": [%s,%s]
 	}`, expectedConf1, expectedConf2)),
@@ -392,7 +376,7 @@ var _ = Describe("multus operations cniVersion 0.2.0 config", func() {
 			StdinData: []byte(fmt.Sprintf(`{
 		    "name": "node-cni-network",
 		    "type": "multus",
-		    "defaultnetworkfile": "/tmp/foo.multus.conf",
+		    "readinessindicatorfile": "/tmp/foo.multus.conf",
 		    "defaultnetworkwaitseconds": 3,
 		    "delegates": [%s,%s]
 		}`, expectedConf1, expectedConf2)),
@@ -767,68 +751,6 @@ var _ = Describe("multus operations cniVersion 0.2.0 config", func() {
 		err = CmdDel(args, fExec, fKubeClient)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fExec.delIndex).To(Equal(len(fExec.plugins)))
-	})
-
-	It("fails to execute confListDel given no 'plugins' key", func() {
-		args := &skel.CmdArgs{
-			ContainerID: "123456789",
-			Netns:       testNS.Path(),
-			IfName:      "eth0",
-			StdinData: []byte(`{
-	    "name": "node-cni-network",
-	    "type": "multus",
-	    "defaultnetworkfile": "/tmp/foo.multus.conf",
-	    "defaultnetworkwaitseconds": 3,
-	    "delegates": [{
-	        "name": "weave1",
-	        "cniVersion": "0.2.0",
-	        "type": "weave-net"
-	    },{
-	        "name": "other1",
-	        "cniVersion": "0.2.0",
-	        "type": "other-plugin"
-	    }]
-	}`),
-		}
-
-		fExec := newFakeExec()
-		expectedResult1 := &types020.Result{
-			CNIVersion: "0.2.0",
-			IP4: &types020.IPConfig{
-				IP: *testhelpers.EnsureCIDR("1.1.1.2/24"),
-			},
-		}
-		expectedConf1 := `{
-	    "name": "weave1",
-	    "cniVersion": "0.2.0",
-	    "type": "weave-net"
-	}`
-		fExec.addPlugin020(nil, "eth0", expectedConf1, expectedResult1, nil)
-
-		expectedResult2 := &types020.Result{
-			CNIVersion: "0.2.0",
-			IP4: &types020.IPConfig{
-				IP: *testhelpers.EnsureCIDR("1.1.1.5/24"),
-			},
-		}
-		expectedConf2 := `{
-	    "name": "other1",
-	    "cniVersion": "0.2.0",
-	    "type": "other-plugin"
-	}`
-		fExec.addPlugin020(nil, "net1", expectedConf2, expectedResult2, nil)
-
-		fakeMultusNetConf := types.NetConf{
-			BinDir: "/opt/cni/bin",
-		}
-		// use fExec for the exec param
-		rawnetconflist := []byte(`{"cniVersion":"0.2.0","name":"weave1","type":"weave-net"}`)
-		k8sargs, err := k8sclient.GetK8sArgs(args)
-		n, err := types.LoadNetConf(args.StdinData)
-		rt, _ := types.CreateCNIRuntimeConf(args, k8sargs, args.IfName, n.RuntimeConfig, nil)
-
-		err = conflistDel(rt, rawnetconflist, &fakeMultusNetConf, fExec)
-		Expect(err).To(HaveOccurred())
 	})
 
 })

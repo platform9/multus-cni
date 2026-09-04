@@ -19,7 +19,8 @@ spec:
     singular: network-attachment-definition
     kind: NetworkAttachmentDefinition
     shortNames:
-    - net-attach-def
+      - nad
+      - net-attach-def
   versions:
     - name: v1
       served: true
@@ -69,7 +70,18 @@ rules:
       - pods/status
     verbs:
       - get
+      - list
       - update
+      - watch
+  - apiGroups:
+      - "resource.k8s.io"
+    resources:
+      - resourceclaims
+      - resourceclaims/status
+      - resourceslices
+    verbs:
+      - get
+      - list
   - apiGroups:
       - ""
       - events.k8s.io
@@ -197,6 +209,7 @@ spec:
           privileged: true
           capabilities:
             add: ["SYS_ADMIN"]
+        terminationMessagePolicy: FallbackToLogsOnError
         volumeMounts:
         - name: run
           mountPath: /run
@@ -207,7 +220,7 @@ spec:
           mountPath: /host/usr/libexec/cni
         - name: multus-cfg
           mountPath: /tmp/multus-conf
-      terminationGracePeriodSeconds: 10
+      terminationGracePeriodSeconds: 30
       volumes:
         - name: run
           hostPath:

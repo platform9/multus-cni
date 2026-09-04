@@ -39,13 +39,17 @@ cd multus-cni
 ./hack/build-go.sh
 ```
 
-## How do I run CI tests?
+## How do I run the unit tests?
 
 Multus has go unit tests (based on ginkgo framework).The following commands drive CI tests manually in your environment:
 
 ```
 sudo ./hack/test-go.sh
 ```
+
+## How do I run the e2e tests?
+
+Check the `README.md` in the `./e2e/` folder.
 
 ## What are the best practices for logging?
 
@@ -59,3 +63,7 @@ The following are the best practices for multus logging:
 ## Multus release schedule
 
 On the first maintainer's meeting, twice yearly, after January 1st and July 1st, if a new version has not been tagged, a new version will tagged.
+
+## Multi-arch builds
+
+Multus is currently built for a number of architectures, however, our testing and validation is only performed against x86 architectures. Our x86 architecture has end to end testing, however, for other architectures, only supported via best effort community contributions.

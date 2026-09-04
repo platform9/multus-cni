@@ -46,6 +46,7 @@ var (
 )
 
 type fakeResourceServer struct {
+	podresourcesapi.UnimplementedPodResourcesListerServer
 	server *grpc.Server
 }
 
@@ -60,10 +61,6 @@ func (m *fakeResourceServer) Get(_ context.Context, _ *podresourcesapi.GetPodRes
 }
 
 func (m *fakeResourceServer) List(_ context.Context, _ *podresourcesapi.ListPodResourcesRequest) (*podresourcesapi.ListPodResourcesResponse, error) {
-	podName := "pod-name"
-	podNamespace := "pod-namespace"
-	containerName := "container-name"
-
 	devs := []*podresourcesapi.ContainerDevices{
 		{
 			ResourceName: "resource",
@@ -74,11 +71,11 @@ func (m *fakeResourceServer) List(_ context.Context, _ *podresourcesapi.ListPodR
 	resp := &podresourcesapi.ListPodResourcesResponse{
 		PodResources: []*podresourcesapi.PodResources{
 			{
-				Name:      podName,
-				Namespace: podNamespace,
+				Name:      "pod-name",
+				Namespace: "pod-namespace",
 				Containers: []*podresourcesapi.ContainerResources{
 					{
-						Name:    containerName,
+						Name:    "container-name",
 						Devices: devs,
 					},
 				},
@@ -188,7 +185,7 @@ var _ = Describe("Kubelet resource endpoint data read operations", func() {
 		})
 	})
 	Context("GetPodResourceMap() with valid pod name and namespace", func() {
-		It("should return no error", func() {
+		It("should return no error with device plugin resource", func() {
 			podUID := k8sTypes.UID("970a395d-bb3b-11e8-89df-408d5c537d23")
 			fakePod := &v1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
@@ -277,6 +274,132 @@ var _ = Describe("Kubelet resource endpoint data read operations", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(resourceMap).ShouldNot(BeNil())
 			Expect(resourceMap).To(Equal(emptyRMap))
+		})
+	})
+
+	Context("GetPodResourceMap() DeviceID ordering", func() {
+		pod := &v1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "pod-name", Namespace: "pod-namespace"},
+		}
+
+		It("sorts IDs within a container and does not mutate kubelet-owned slices", func() {
+			c0IDs := []string{"0000:03:00.5", "0000:03:00.1"}
+			rc := &kubeletClient{
+				resources: []*podresourcesapi.PodResources{
+					{
+						Name:      "pod-name",
+						Namespace: "pod-namespace",
+						Containers: []*podresourcesapi.ContainerResources{
+							{
+								Name: "ctr-0",
+								Devices: []*podresourcesapi.ContainerDevices{
+									{ResourceName: "sriov", DeviceIds: c0IDs},
+								},
+							},
+							{
+								Name: "ctr-1",
+								Devices: []*podresourcesapi.ContainerDevices{
+									{ResourceName: "sriov", DeviceIds: []string{"0000:03:00.9"}},
+								},
+							},
+						},
+					},
+				},
+			}
+
+			resourceMap, err := rc.GetPodResourceMap(pod)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resourceMap["sriov"].DeviceIDs).To(Equal([]string{"0000:03:00.1", "0000:03:00.5", "0000:03:00.9"}))
+			Expect(c0IDs).To(Equal([]string{"0000:03:00.5", "0000:03:00.1"}))
+		})
+
+		It("does not reorder devices across containers", func() {
+			rc := &kubeletClient{
+				resources: []*podresourcesapi.PodResources{
+					{
+						Name:      "pod-name",
+						Namespace: "pod-namespace",
+						Containers: []*podresourcesapi.ContainerResources{
+							{
+								Name: "ctr-0",
+								Devices: []*podresourcesapi.ContainerDevices{
+									{ResourceName: "sriov", DeviceIds: []string{"0000:03:00.5"}},
+								},
+							},
+							{
+								Name: "ctr-1",
+								Devices: []*podresourcesapi.ContainerDevices{
+									{ResourceName: "sriov", DeviceIds: []string{"0000:03:00.1"}},
+								},
+							},
+						},
+					},
+				},
+			}
+
+			resourceMap, err := rc.GetPodResourceMap(pod)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resourceMap["sriov"].DeviceIDs).To(Equal([]string{"0000:03:00.5", "0000:03:00.1"}))
+		})
+
+		// Each container requests two devices of the same resource name. IDs are
+		// sorted inside a container; container blocks stay in kubelet order.
+		It("sorts within each container when both have multiple devices of the same resource", func() {
+			rc := &kubeletClient{
+				resources: []*podresourcesapi.PodResources{
+					{
+						Name:      "pod-name",
+						Namespace: "pod-namespace",
+						Containers: []*podresourcesapi.ContainerResources{
+							{
+								Name: "ctr-0",
+								Devices: []*podresourcesapi.ContainerDevices{
+									{ResourceName: "sriov", DeviceIds: []string{"0000:03:02.3", "0000:03:02.0"}},
+								},
+							},
+							{
+								Name: "ctr-1",
+								Devices: []*podresourcesapi.ContainerDevices{
+									{ResourceName: "sriov", DeviceIds: []string{"0000:03:02.5", "0000:03:02.1"}},
+								},
+							},
+						},
+					},
+				},
+			}
+
+			resourceMap, err := rc.GetPodResourceMap(pod)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resourceMap["sriov"].DeviceIDs).To(Equal([]string{
+				"0000:03:02.0", "0000:03:02.3",
+				"0000:03:02.1", "0000:03:02.5",
+			}))
+		})
+
+		It("aggregates then sorts multiple ContainerDevices rows for the same resource on one container", func() {
+			rc := &kubeletClient{
+				resources: []*podresourcesapi.PodResources{
+					{
+						Name:      "pod-name",
+						Namespace: "pod-namespace",
+						Containers: []*podresourcesapi.ContainerResources{
+							{
+								Name: "ctr-0",
+								Devices: []*podresourcesapi.ContainerDevices{
+									{ResourceName: "sriov", DeviceIds: []string{"0000:03:00.5", "0000:03:00.1"}},
+									{ResourceName: "sriov", DeviceIds: []string{"0000:03:00.9", "0000:03:00.2"}},
+								},
+							},
+						},
+					},
+				},
+			}
+
+			resourceMap, err := rc.GetPodResourceMap(pod)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resourceMap["sriov"].DeviceIDs).To(Equal([]string{
+				"0000:03:00.1", "0000:03:00.2", "0000:03:00.5", "0000:03:00.9",
+			}))
 		})
 	})
 })

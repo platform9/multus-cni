@@ -19,6 +19,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -27,7 +28,6 @@ import (
 
 	certificatesv1 "k8s.io/api/certificates/v1"
 	v1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -54,27 +54,55 @@ var (
 	certUsages = []certificatesv1.KeyUsage{certificatesv1.UsageDigitalSignature, certificatesv1.UsageClientAuth}
 )
 
+// isTransientCertError determines if a certificate error is transient (e.g., due to
+// certificate rotation) and should be retried, or if it's a permanent error that
+// requires different handling.
+func isTransientCertError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var noCertKeyErr *certificate.NoCertKeyError
+	if errors.As(err, &noCertKeyErr) {
+		// No cert/key currently present (initial provisioning, or rotation
+		// briefly removing the symlink) - retry.
+		return true
+	}
+	// The certificate store wraps these errors with fmt.Errorf("%v", ...) rather than
+	// %w, so errors.Is/errors.As can't unwrap them - string matching is the only option.
+	errMsg := err.Error()
+	if strings.Contains(errMsg, "no such file or directory") ||
+		strings.Contains(errMsg, "failed to find any PEM data") ||
+		strings.Contains(errMsg, "invalid PEM") {
+		return true
+	}
+	return false
+}
+
 // getPerNodeKubeconfig creates new kubeConfig, based on bootstrap, with new certDir
 func getPerNodeKubeconfig(bootstrap *rest.Config, certDir string) *rest.Config {
-	return &rest.Config{
-		Host:    bootstrap.Host,
-		APIPath: bootstrap.APIPath,
-		ContentConfig: rest.ContentConfig{
-			AcceptContentTypes: "application/vnd.kubernetes.protobuf,application/json",
-			ContentType:        "application/vnd.kubernetes.protobuf",
-		},
-		TLSClientConfig: rest.TLSClientConfig{
-			KeyFile:  path.Join(certDir, certNamePrefix+"-current.pem"),
-			CertFile: path.Join(certDir, certNamePrefix+"-current.pem"),
-			CAData:   bootstrap.TLSClientConfig.CAData,
-		},
-		// Allow multus (especially in server mode) to make more concurrent requests
-		// to reduce client-side throttling
-		QPS:   50,
-		Burst: 50,
-		// Set the config timeout to one minute.
-		Timeout: time.Minute,
-	}
+	config := rest.CopyConfig(bootstrap)
+	config.TLSClientConfig.CertFile = path.Join(certDir, certNamePrefix+"-current.pem")
+	config.TLSClientConfig.KeyFile = path.Join(certDir, certNamePrefix+"-current.pem")
+	config.TLSClientConfig.CertData = nil
+	config.TLSClientConfig.KeyData = nil
+
+	// Switch to the per-node client certificate instead of reusing bootstrap auth.
+	config.BearerToken = ""
+	config.BearerTokenFile = ""
+	config.Username = ""
+	config.Password = ""
+	config.ExecProvider = nil
+	config.AuthProvider = nil
+
+	config.AcceptContentTypes = "application/vnd.kubernetes.protobuf,application/json"
+	config.ContentType = "application/vnd.kubernetes.protobuf"
+	// Allow multus (especially in server mode) to make more concurrent requests
+	// to reduce client-side throttling
+	config.QPS = 50
+	config.Burst = 50
+	// Set the config timeout to one minute.
+	config.Timeout = time.Minute
+	return config
 }
 
 // PerNodeK8sClient creates/reload new multus kubeconfig per-node.
@@ -85,32 +113,34 @@ func PerNodeK8sClient(nodeName, bootstrapKubeconfigFile string, certDuration tim
 	}
 	config := getPerNodeKubeconfig(bootstrapKubeconfig, certDir)
 
-	// If we have a valid certificate, user that to fetch CSRs.
+	// If we have a valid certificate, use that to fetch CSRs.
 	// Otherwise, use the bootstrap credentials from bootstrapKubeconfig
 	// https://github.com/kubernetes/kubernetes/blob/068ee321bc7bfe1c2cefb87fb4d9e5deea84fbc8/cmd/kubelet/app/server.go#L953-L963
 	newClientsetFn := func(current *tls.Certificate) (kubernetes.Interface, error) {
 		cfg := bootstrapKubeconfig
 
-		// validate the kubeconfig
-		tempClient, err := kubernetes.NewForConfig(cfg)
-		if err != nil {
-			logging.Errorf("failed to read kubeconfig from cert manager: %v", err)
-		} else {
-			_, err := tempClient.CoreV1().Pods("").List(context.TODO(), metav1.ListOptions{})
-			// tls unknown authority error is unrecoverable error with retry
+		// When a current certificate exists, prefer it for CSR operations but fall back
+		// to bootstrap credentials if the stored per-node config is no longer trusted.
+		if current != nil {
+			cfg = config
+			tempClient, err := kubernetes.NewForConfig(cfg)
+			if err != nil {
+				return nil, logging.Errorf("failed to create client from per-node kubeconfig: %v", err)
+			}
+			_, err = tempClient.Discovery().ServerVersion()
 			if err != nil {
 				if strings.Contains(err.Error(), "x509: certificate signed by unknown authority") {
-					logging.Verbosef("cert mgr gets invalid config. rebuild from bootstrap kubeconfig")
-					// reload and use bootstrapKubeconfig again
-					newBootstrapKubeconfig, _ := clientcmd.BuildConfigFromFlags("", bootstrapKubeconfigFile)
-					cfg = newBootstrapKubeconfig
+					logging.Verbosef("cert mgr gets invalid per-node config. rebuild from bootstrap kubeconfig")
+					newBootstrapKubeconfig, reloadErr := clientcmd.BuildConfigFromFlags("", bootstrapKubeconfigFile)
+					if reloadErr != nil {
+						return nil, logging.Errorf("failed to reload bootstrap kubeconfig: %v", reloadErr)
+					}
+					bootstrapKubeconfig = newBootstrapKubeconfig
+					config = getPerNodeKubeconfig(bootstrapKubeconfig, certDir)
+					cfg = bootstrapKubeconfig
 				} else {
-					logging.Errorf("failed to list pods with new certs: %v", err)
+					logging.Errorf("failed to validate per-node kubeconfig: %v", err)
 				}
-			}
-
-			if current != nil {
-				cfg = config
 			}
 		}
 		return kubernetes.NewForConfig(cfg)
@@ -149,7 +179,14 @@ func PerNodeK8sClient(nodeName, bootstrapKubeconfigFile string, certDuration tim
 	err = wait.PollWithContext(context.TODO(), time.Second, 2*time.Minute, func(_ context.Context) (bool, error) {
 		var currentCert *tls.Certificate
 		currentCert, storeErr = certificateStore.Current()
-		return currentCert != nil && storeErr == nil, nil
+		if storeErr != nil {
+			if isTransientCertError(storeErr) {
+				logging.Verbosef("Transient cert error (likely rotation in progress), will retry: %v", storeErr)
+				return false, nil
+			}
+			return false, storeErr
+		}
+		return currentCert != nil, nil
 	})
 	if err != nil {
 		return nil, logging.Errorf("certificate was not signed, last cert store err: %v err: %v", storeErr, err)

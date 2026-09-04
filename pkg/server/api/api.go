@@ -24,6 +24,8 @@ import (
 	"strings"
 	"time"
 
+	cnitypes "github.com/containernetworking/cni/pkg/types"
+
 	utilwait "k8s.io/apimachinery/pkg/util/wait"
 )
 
@@ -41,6 +43,9 @@ const (
 
 	// MultusHealthAPIEndpoint is an endpoint API clients can query to know if they can communicate w/ multus server
 	MultusHealthAPIEndpoint = "/healthz"
+
+	// MultusReadyAPIEndpoint is like health, but starts returning status 500 once a sig-term is received.
+	MultusReadyAPIEndpoint = "/readyz"
 )
 
 // DoCNI sends a CNI request to the CNI server via JSON + HTTP over a root-owned unix socket,
@@ -71,6 +76,10 @@ func DoCNI(url string, req interface{}, socketPath string) ([]byte, error) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		cniErr := &cnitypes.Error{}
+		if err := json.Unmarshal(body, cniErr); err == nil && cniErr.Msg != "" {
+			return nil, cniErr
+		}
 		return nil, fmt.Errorf("CNI request failed with status %v: '%s'", resp.StatusCode, string(body))
 	}
 
@@ -100,7 +109,16 @@ func CreateDelegateRequest(cniCommand, cniContainerID, cniNetNS, cniIFName, podN
 // WaitUntilAPIReady checks API readiness
 func WaitUntilAPIReady(socketPath string) error {
 	return utilwait.PollImmediate(APIReadyPollDuration, APIReadyPollTimeout, func() (bool, error) {
-		_, err := DoCNI(GetAPIEndpoint(MultusHealthAPIEndpoint), nil, SocketPath(socketPath))
+		_, err := DoCNI(GetAPIEndpoint(MultusReadyAPIEndpoint), nil, SocketPath(socketPath))
 		return err == nil, nil
 	})
+}
+
+// CheckAPIReadyNow checks API readiness once
+func CheckAPIReadyNow(socketPath string) error {
+	_, err := DoCNI(GetAPIEndpoint(MultusHealthAPIEndpoint), nil, SocketPath(socketPath))
+	if err != nil {
+		return fmt.Errorf("CheckAPIReadyNow: Daemon not reachable over socketfile: %v", err)
+	}
+	return nil
 }

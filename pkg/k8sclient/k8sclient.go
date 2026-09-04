@@ -18,11 +18,14 @@ package k8sclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -39,6 +42,7 @@ import (
 	netclient "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/clientset/versioned"
 	netlister "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/listers/k8s.cni.cncf.io/v1"
 	netutils "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/utils"
+	"gopkg.in/k8snetworkplumbingwg/multus-cni.v4/pkg/draclient"
 	"gopkg.in/k8snetworkplumbingwg/multus-cni.v4/pkg/kubeletclient"
 	"gopkg.in/k8snetworkplumbingwg/multus-cni.v4/pkg/logging"
 	"gopkg.in/k8snetworkplumbingwg/multus-cni.v4/pkg/types"
@@ -49,6 +53,10 @@ const (
 	defaultNetAnnot        = "v1.multus-cni.io/default-network"
 	networkAttachmentAnnot = "k8s.v1.cni.cncf.io/networks"
 )
+
+// getResourceClientFunc returns kubelet / device-plugin resource info for a pod.
+// It defaults to kubeletclient.GetResourceClient; unit tests replace it to avoid a real kubelet checkpoint/socket.
+var getResourceClientFunc = kubeletclient.GetResourceClient
 
 // NoK8sNetworkError indicates error, no network in kubernetes
 type NoK8sNetworkError struct {
@@ -79,6 +87,20 @@ func (c *ClientInfo) GetPod(namespace, name string) (*v1.Pod, error) {
 		return listers.NewPodLister(c.PodInformer.GetIndexer()).Pods(namespace).Get(name)
 	}
 	return c.Client.CoreV1().Pods(namespace).Get(context.TODO(), name, metav1.GetOptions{})
+}
+
+// GetPodContext gets pod from kubernetes with context
+func (c *ClientInfo) GetPodContext(ctx context.Context, namespace, name string) (*v1.Pod, error) {
+	if c.PodInformer != nil {
+		logging.Debugf("GetPod for [%s/%s] will use informer cache", namespace, name)
+		return listers.NewPodLister(c.PodInformer.GetIndexer()).Pods(namespace).Get(name)
+	}
+	return c.Client.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
+}
+
+// GetPodAPILiveQuery does a live API query for the pod, instead of using informers, for cases when a failure occurred, as to prevent a cache miss.
+func (c *ClientInfo) GetPodAPILiveQuery(ctx context.Context, namespace, name string) (*v1.Pod, error) {
+	return c.Client.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
 }
 
 // DeletePod deletes a pod from kubernetes
@@ -182,13 +204,19 @@ func parsePodNetworkObjectName(podnetwork string) (string, string, string, error
 	// Check and see if each item matches the specification for valid attachment name.
 	// "Valid attachment names must be comprised of units of the DNS-1123 label format"
 	// [a-z0-9]([-a-z0-9]*[a-z0-9])?
-	// And we allow at (@), and forward slash (/) (units separated by commas)
 	// It must start and end alphanumerically.
-	allItems := []string{netNsName, networkName, netIfName}
+	allItems := []string{netNsName, networkName}
+	expr := regexp.MustCompile("^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 	for i := range allItems {
-		matched, _ := regexp.MatchString("^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", allItems[i])
+		matched := expr.MatchString(allItems[i])
 		if !matched && len([]rune(allItems[i])) > 0 {
-			return "", "", "", logging.Errorf(fmt.Sprintf("parsePodNetworkObjectName: Failed to parse: one or more items did not match comma-delimited format (must consist of lower case alphanumeric characters). Must start and end with an alphanumeric character), mismatch @ '%v'", allItems[i]))
+			return "", "", "", logging.Errorf("parsePodNetworkObjectName: Failed to parse: one or more items did not match comma-delimited format (must consist of lower case alphanumeric characters). Must start and end with an alphanumeric character), mismatch @ '%v'", allItems[i])
+		}
+	}
+
+	if len(netIfName) > 0 {
+		if len(netIfName) > (syscall.IFNAMSIZ-1) || strings.ContainsAny(netIfName, " \t\n\v\f\r/") {
+			return "", "", "", logging.Errorf("parsePodNetworkObjectName: Failed to parse interface name: must be less than 15 chars and not contain '/' or spaces. interface name '%s'", netIfName)
 		}
 	}
 
@@ -273,20 +301,20 @@ func getKubernetesDelegate(client *ClientInfo, net *types.NetworkSelectionElemen
 	if err != nil {
 		errMsg := fmt.Sprintf("cannot find a network-attachment-definition (%s) in namespace (%s): %v", net.Name, net.Namespace, err)
 		if client != nil {
-			client.Eventf(pod, v1.EventTypeWarning, "NoNetworkFound", errMsg)
+			client.Eventf(pod, v1.EventTypeWarning, "NoNetworkFound", "%s", errMsg)
 		}
-		return nil, resourceMap, logging.Errorf("getKubernetesDelegate: " + errMsg)
+		return nil, resourceMap, logging.Errorf("getKubernetesDelegate: %s", errMsg)
 	}
 
 	// Get resourceName annotation from NetworkAttachmentDefinition
 	deviceID := ""
 	resourceName, ok := customResource.GetAnnotations()[resourceNameAnnot]
-	if ok && pod.Name != "" && pod.Namespace != "" {
+	if ok && pod != nil && pod.Name != "" && pod.Namespace != "" {
 		// ResourceName annotation is found; try to get device info from resourceMap
 		logging.Debugf("getKubernetesDelegate: found resourceName annotation : %s", resourceName)
 
 		if resourceMap == nil {
-			ck, err := kubeletclient.GetResourceClient("")
+			ck, err := getResourceClientFunc("")
 			if err != nil {
 				return nil, resourceMap, logging.Errorf("getKubernetesDelegate: failed to get a ResourceClient instance: %v", err)
 			}
@@ -294,6 +322,13 @@ func getKubernetesDelegate(client *ClientInfo, net *types.NetworkSelectionElemen
 			if err != nil {
 				return nil, resourceMap, logging.Errorf("getKubernetesDelegate: failed to get resourceMap from ResourceClient: %v", err)
 			}
+
+			dc := draclient.NewClient(client.Client.ResourceV1())
+			err = dc.GetPodResourceMap(context.TODO(), pod, resourceMap)
+			if err != nil {
+				return nil, resourceMap, logging.Errorf("getKubernetesDelegate: failed to get resourceMap from DRA client: %v", err)
+			}
+
 			logging.Debugf("getKubernetesDelegate: resourceMap instance: %+v", resourceMap)
 		}
 
@@ -517,29 +552,117 @@ func getNetDelegate(client *ClientInfo, pod *v1.Pod, netname, confdir, namespace
 		} else {
 			// option4) if file path (absolute), then load it directly
 			if strings.HasSuffix(netname, ".conflist") {
-				confList, err := libcni.ConfListFromFile(netname)
+				confList, err := LoadChainedPluginsFromFile(netname)
 				if err != nil {
 					return nil, resourceMap, logging.Errorf("error loading CNI conflist file %s: %v", netname, err)
 				}
-				configBytes = confList.Bytes
-			} else {
-				conf, err := libcni.ConfFromFile(netname)
+
+				delegate, err := types.LoadDelegateNetConfFromConfList(confList, nil, "", "")
 				if err != nil {
-					return nil, resourceMap, logging.Errorf("error loading CNI config file %s: %v", netname, err)
+					return nil, resourceMap, err
 				}
-				if conf.Network.Type == "" {
-					return nil, resourceMap, logging.Errorf("error loading CNI config file %s: no 'type'; perhaps this is a .conflist?", netname)
-				}
-				configBytes = conf.Bytes
+				return delegate, resourceMap, nil
+
 			}
-			delegate, err := types.LoadDelegateNetConf(configBytes, nil, "", "")
+
+			// Or it's not a conflist...
+			// after libcni v1.2.3 there's no support support this old-school method with non-conflists.
+			// this method doesn't check if there's a 0 length plugins field, that is.
+			conf, err := libcni.ConfFromFile(netname)
+			if err != nil {
+				return nil, resourceMap, logging.Errorf("error loading CNI config file %s: %v", netname, err)
+			}
+			if conf.Network.Type == "" {
+				return nil, resourceMap, logging.Errorf("error loading CNI config file %s: no 'type'; perhaps this is supposed to be a .conflist?", netname)
+			}
+
+			delegate, err := types.LoadDelegateNetConf(conf.Bytes, nil, "", "")
 			if err != nil {
 				return nil, resourceMap, err
 			}
 			return delegate, resourceMap, nil
 		}
+
 	}
 	return nil, resourceMap, logging.Errorf("getNetDelegate: cannot find network: %v", netname)
+}
+
+func loadSubdirectoryChain(bytes []byte, cniconfdir string) (*libcni.NetworkConfigList, error) {
+	// Load the network configuration from the byte array
+	conf, err := libcni.NetworkConfFromBytes(bytes)
+	if err != nil {
+		return nil, fmt.Errorf("error loading network config from bytes: %v", err)
+	}
+
+	// Check if plugins need to be loaded from files
+	if !conf.LoadOnlyInlinedPlugins && cniconfdir != "" {
+		// Let's validate that conf.Name
+		// From the CNI spec:
+		// > Must start with an alphanumeric character, optionally followed by any combination of one or more alphanumeric characters,
+		// > underscore, dot (.) or hyphen (-). Must not contain characters disallowed in file paths.
+		if !regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`).MatchString(conf.Name) {
+			return nil, fmt.Errorf("invalid network config name: %s", conf.Name)
+		}
+
+		plugins, err := libcni.NetworkPluginConfsFromFiles(cniconfdir, conf.Name)
+		if err != nil {
+			return nil, fmt.Errorf("error loading plugin configs: %v", err)
+		}
+		conf.Plugins = append(conf.Plugins, plugins...)
+	}
+
+	if len(conf.Plugins) == 0 {
+		return nil, fmt.Errorf("no plugin configs found")
+	}
+
+	return conf, nil
+}
+
+// LoadChainedDelegatesFromBytes loads a CNI configuration byte array and returns a DelegateNetConf with the chain added.
+func LoadChainedDelegatesFromBytes(bytes []byte, cniconfdir string) *types.DelegateNetConf {
+	conf, err := loadSubdirectoryChain(bytes, cniconfdir)
+	if err != nil {
+		logging.Errorf("LoadChainedDelegatesFromBytes: %v", err)
+		return nil
+	}
+
+	// Create and return a DelegateNetConf from the configuration list
+	delegate, err := types.LoadDelegateNetConfFromConfList(conf, nil, "", "")
+	if err != nil {
+		logging.Errorf("LoadChainedDelegatesFromBytes: error loading delegate network config: %v", err)
+		return nil
+	}
+
+	return delegate
+}
+
+// LoadChainedPluginsFromFile loads a CNI configuration file and returns the NetworkConfigList
+func LoadChainedPluginsFromFile(filename string) (*libcni.NetworkConfigList, error) {
+	cleanPath := filepath.Clean(filename)
+
+	// stat the file to make sure it's a normal file.
+	info, err := os.Stat(cleanPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if !info.Mode().IsRegular() {
+		return nil, errors.New("CNI configuration path is not a regular file")
+	}
+
+	bytes, err := os.ReadFile(cleanPath)
+	if err != nil {
+		return nil, fmt.Errorf("error reading %s: %w", filename, err)
+	}
+	logging.Debugf("LoadChainedPluginsFromFile: %s", filename)
+
+	conf, err := loadSubdirectoryChain(bytes, filepath.Dir(filename))
+	if err != nil {
+		return nil, err
+	}
+	logging.Debugf("Loaded SubdirectoryChain: %+v", conf)
+
+	return conf, nil
 }
 
 // GetDefaultNetworks parses 'defaultNetwork' config, gets network json and put it into netconf.Delegates.
@@ -568,7 +691,7 @@ func GetDefaultNetworks(pod *v1.Pod, conf *types.NetConf, kubeClient *ClientInfo
 	delegates = append(delegates, delegate)
 
 	// Pod in kube-system namespace does not have default network for now.
-	if !types.CheckSystemNamespaces(pod.ObjectMeta.Namespace, conf.SystemNamespaces) {
+	if pod != nil && !types.CheckSystemNamespaces(pod.ObjectMeta.Namespace, conf.SystemNamespaces) {
 		for _, netname := range conf.DefaultNetworks {
 			delegate, resourceMap, err := getNetDelegate(kubeClient, pod, netname, conf.ConfDir, conf.MultusNamespace, resourceMap)
 			if err != nil {

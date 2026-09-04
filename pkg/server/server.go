@@ -17,6 +17,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -50,7 +51,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	"k8s.io/apimachinery/pkg/util/sets"
 	utilwait "k8s.io/apimachinery/pkg/util/wait"
 	informerfactory "k8s.io/client-go/informers"
 	v1coreinformers "k8s.io/client-go/informers/core/v1"
@@ -83,6 +83,7 @@ func printCmdArgs(args *skel.CmdArgs) string {
 
 // HandleCNIRequest is the CNI server handler function; it is invoked whenever
 // a CNI request is processed.
+// Note: k8sArgs may be nil for plugin-level commands (STATUS, GC) that have no pod context.
 func (s *Server) HandleCNIRequest(cmd string, k8sArgs *types.K8sArgs, cniCmdArgs *skel.CmdArgs) ([]byte, error) {
 	var result []byte
 	var err error
@@ -95,15 +96,15 @@ func (s *Server) HandleCNIRequest(cmd string, k8sArgs *types.K8sArgs, cniCmdArgs
 		err = s.cmdDel(cniCmdArgs, k8sArgs)
 	case "CHECK":
 		err = s.cmdCheck(cniCmdArgs, k8sArgs)
+	case "GC":
+		err = s.cmdGC(cniCmdArgs, k8sArgs)
+	case "STATUS":
+		err = s.cmdStatus(cniCmdArgs, k8sArgs)
 	default:
 		return []byte(""), fmt.Errorf("unknown cmd type: %s", cmd)
 	}
 	logging.Verbosef("%s finished CNI request %s, result: %q, err: %v", cmd, printCmdArgs(cniCmdArgs), string(result), err)
-	if err != nil {
-		// Prefix errors with request info for easier failure debugging
-		return nil, fmt.Errorf("%s ERRORED: %v", printCmdArgs(cniCmdArgs), err)
-	}
-	return result, nil
+	return result, err
 }
 
 // HandleDelegateRequest is the CNI server handler function; it is invoked whenever
@@ -125,15 +126,13 @@ func (s *Server) HandleDelegateRequest(cmd string, k8sArgs *types.K8sArgs, cniCm
 		err = s.cmdDelegateDel(cniCmdArgs, k8sArgs, multusConfig)
 	case "CHECK":
 		err = s.cmdDelegateCheck(cniCmdArgs, k8sArgs, multusConfig)
+	case "STATUS":
+		err = s.cmdDelegateStatus(cniCmdArgs, k8sArgs, multusConfig)
 	default:
 		return []byte(""), fmt.Errorf("unknown cmd type: %s", cmd)
 	}
 	logging.Verbosef("%s finished Delegate request %s, result: %q, err: %v", cmd, printCmdArgs(cniCmdArgs), string(result), err)
-	if err != nil {
-		// Prefix errors with request info for easier failure debugging
-		return nil, fmt.Errorf("%s ERRORED: %v", printCmdArgs(cniCmdArgs), err)
-	}
-	return result, nil
+	return result, err
 }
 
 // GetListener creates a listener to a unix socket located in `socketPath`
@@ -217,7 +216,7 @@ func isPerNodeCertEnabled(config *PerNodeCertificate) (bool, error) {
 }
 
 // NewCNIServer creates and returns a new Server object which will listen on a socket in the given path
-func NewCNIServer(daemonConfig *ControllerNetConf, serverConfig []byte, ignoreReadinessIndicator bool) (*Server, error) {
+func NewCNIServer(daemonConfig *ControllerNetConf, serverConfig []byte, ignoreReadinessIndicator bool, isInGracefulShutdownMode func() bool) (*Server, error) {
 	var kubeClient *k8s.ClientInfo
 	enabled, err := isPerNodeCertEnabled(daemonConfig.PerNodeCertificate)
 	if enabled {
@@ -259,10 +258,10 @@ func NewCNIServer(daemonConfig *ControllerNetConf, serverConfig []byte, ignoreRe
 		logging.Verbosef("server configured with chroot: %s", daemonConfig.ChrootDir)
 	}
 
-	return newCNIServer(daemonConfig.SocketDir, kubeClient, exec, serverConfig, ignoreReadinessIndicator)
+	return newCNIServer(daemonConfig.SocketDir, kubeClient, exec, serverConfig, ignoreReadinessIndicator, isInGracefulShutdownMode)
 }
 
-func newCNIServer(rundir string, kubeClient *k8s.ClientInfo, exec invoke.Exec, servConfig []byte, ignoreReadinessIndicator bool) (*Server, error) {
+func newCNIServer(rundir string, kubeClient *k8s.ClientInfo, exec invoke.Exec, servConfig []byte, ignoreReadinessIndicator bool, isInGracefulShutdownMode func() bool) (*Server, error) {
 	informerFactory, podInformer := newPodInformer(kubeClient.Client, os.Getenv("MULTUS_NODE_NAME"))
 	netdefInformerFactory, netdefInformer := newNetDefInformer(kubeClient.NetClient)
 	kubeClient.SetK8sClientInformers(podInformer, netdefInformer)
@@ -300,13 +299,13 @@ func newCNIServer(rundir string, kubeClient *k8s.ClientInfo, exec invoke.Exec, s
 	router.HandleFunc(api.MultusCNIAPIEndpoint, promhttp.InstrumentHandlerCounter(s.metrics.requestCounter.MustCurryWith(prometheus.Labels{"handler": api.MultusCNIAPIEndpoint}),
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
-				http.Error(w, fmt.Sprintf("Method not allowed"), http.StatusMethodNotAllowed)
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 				return
 			}
 
 			result, err := s.handleCNIRequest(r)
 			if err != nil {
-				http.Error(w, fmt.Sprintf("%v", err), http.StatusBadRequest)
+				s.writeCNIErrorResponse(w, err)
 				return
 			}
 
@@ -322,13 +321,13 @@ func newCNIServer(rundir string, kubeClient *k8s.ClientInfo, exec invoke.Exec, s
 	router.HandleFunc(api.MultusDelegateAPIEndpoint, promhttp.InstrumentHandlerCounter(s.metrics.requestCounter.MustCurryWith(prometheus.Labels{"handler": api.MultusDelegateAPIEndpoint}),
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
-				http.Error(w, fmt.Sprintf("Method not allowed"), http.StatusMethodNotAllowed)
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 				return
 			}
 
 			result, err := s.handleDelegateRequest(r)
 			if err != nil {
-				http.Error(w, fmt.Sprintf("%v", err), http.StatusBadRequest)
+				s.writeCNIErrorResponse(w, err)
 				return
 			}
 
@@ -344,12 +343,29 @@ func newCNIServer(rundir string, kubeClient *k8s.ClientInfo, exec invoke.Exec, s
 	router.HandleFunc(api.MultusHealthAPIEndpoint, promhttp.InstrumentHandlerCounter(s.metrics.requestCounter.MustCurryWith(prometheus.Labels{"handler": api.MultusHealthAPIEndpoint}),
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodGet && r.Method != http.MethodPost {
-				http.Error(w, fmt.Sprintf("Method not allowed"), http.StatusMethodNotAllowed)
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 				return
 			}
 
 			w.WriteHeader(http.StatusOK)
 			w.Header().Set("Content-Type", "application/json")
+		})))
+
+	// handle for '/readyz'
+	router.HandleFunc(api.MultusReadyAPIEndpoint, promhttp.InstrumentHandlerCounter(s.metrics.requestCounter.MustCurryWith(prometheus.Labels{"handler": api.MultusReadyAPIEndpoint}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet && r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+
+			if !isInGracefulShutdownMode() {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+			} else {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+			}
 		})))
 
 	// this handle for the rest of above
@@ -393,6 +409,34 @@ func (s *Server) Start(ctx context.Context, l net.Listener) {
 	}()
 }
 
+func (s *Server) writeCNIErrorResponse(w http.ResponseWriter, err error) {
+	var cniErr *cnitypes.Error
+	if errors.As(err, &cniErr) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		errBytes, marshalErr := json.Marshal(cniErr)
+		if marshalErr != nil {
+			http.Error(w, fmt.Sprintf("%v", err), http.StatusBadRequest)
+			return
+		}
+		if _, writeErr := w.Write(errBytes); writeErr != nil {
+			_ = logging.Errorf("Error writing HTTP response: %v", writeErr)
+		}
+		return
+	}
+	http.Error(w, fmt.Sprintf("%v", err), http.StatusBadRequest)
+}
+
+func (s *Server) wrapCNIRequestError(cmdArgs *skel.CmdArgs, err error) error {
+	var cniErr *cnitypes.Error
+	if errors.As(err, &cniErr) {
+		_ = logging.Errorf("%s ERRORED: %v", printCmdArgs(cmdArgs), err)
+		return err
+	}
+	// Prefix error with request information for easier debugging.
+	return fmt.Errorf("%s ERRORED: %v", printCmdArgs(cmdArgs), err)
+}
+
 func (s *Server) handleCNIRequest(r *http.Request) ([]byte, error) {
 	var cr api.Request
 	b, err := io.ReadAll(r.Body)
@@ -407,15 +451,19 @@ func (s *Server) handleCNIRequest(r *http.Request) ([]byte, error) {
 		return nil, fmt.Errorf("could not extract the CNI command args: %w", err)
 	}
 
-	k8sArgs, err := kubernetesRuntimeArgs(cr.Env, s.kubeclient)
-	if err != nil {
-		return nil, fmt.Errorf("could not extract the kubernetes runtime args: %w", err)
+	// STATUS and GC are plugin-level commands with no pod context,
+	// so they don't have K8S_POD_NAME/K8S_POD_NAMESPACE in CNI_ARGS.
+	var k8sArgs *types.K8sArgs
+	if cmdType != "STATUS" && cmdType != "GC" {
+		k8sArgs, err = kubernetesRuntimeArgs(cr.Env, s.kubeclient)
+		if err != nil {
+			return nil, fmt.Errorf("could not extract the kubernetes runtime args: %w", err)
+		}
 	}
 
 	result, err := s.HandleCNIRequest(cmdType, k8sArgs, cniCmdArgs)
 	if err != nil {
-		// Prefix error with request information for easier debugging
-		return nil, fmt.Errorf("%+v %v", cniCmdArgs, err)
+		return nil, s.wrapCNIRequestError(cniCmdArgs, err)
 	}
 	return result, nil
 }
@@ -441,15 +489,21 @@ func (s *Server) handleDelegateRequest(r *http.Request) ([]byte, error) {
 
 	result, err := s.HandleDelegateRequest(cmdType, k8sArgs, cniCmdArgs, cr.InterfaceAttributes)
 	if err != nil {
-		// Prefix error with request information for easier debugging
-		return nil, fmt.Errorf("%s %v", printCmdArgs(cniCmdArgs), err)
+		return nil, s.wrapCNIRequestError(cniCmdArgs, err)
 	}
 	return result, nil
 }
 
 func overrideCNIConfigWithServerConfig(cniConf []byte, overrideConf []byte, ignoreReadinessIndicator bool) ([]byte, error) {
-	if len(overrideConf) == 0 {
+	// If there is no server-side override config AND we don't need to strip any keys,
+	// return the client config unchanged.
+	if len(overrideConf) == 0 && !ignoreReadinessIndicator {
 		return cniConf, nil
+	}
+	// Treat a missing server config as an empty object so the key-stripping logic below
+	// still runs when ignoreReadinessIndicator is true.
+	if len(overrideConf) == 0 {
+		overrideConf = []byte("{}")
 	}
 
 	var cni map[string]interface{}
@@ -462,14 +516,13 @@ func overrideCNIConfigWithServerConfig(cniConf []byte, overrideConf []byte, igno
 		return nil, fmt.Errorf("failed to unmarshall CNI override config: %w", err)
 	}
 
-	// Copy each key of the override config into the CNI config except for
-	// a few specific keys
-	ignoreKeys := sets.NewString()
+	// Remove keys from the client config that the server wants to ignore, then
+	// overlay the server-side overrides (also skipping those same keys).
 	if ignoreReadinessIndicator {
-		ignoreKeys.Insert("readinessindicatorfile")
+		delete(cni, "readinessindicatorfile")
 	}
 	for overrideKey, overrideVal := range override {
-		if !ignoreKeys.Has(overrideKey) {
+		if !ignoreReadinessIndicator || overrideKey != "readinessindicatorfile" {
 			cni[overrideKey] = overrideVal
 		}
 	}
@@ -489,6 +542,18 @@ func (s *Server) extractCniData(cniRequest *api.Request, overrideConf []byte) (s
 	}
 
 	cniCmdArgs := &skel.CmdArgs{}
+
+	// STATUS and GC are plugin-level commands with no pod context;
+	// they don't require CNI_CONTAINERID, CNI_NETNS, or CNI_ARGS.
+	if cmd == "STATUS" || cmd == "GC" {
+		var err error
+		cniCmdArgs.StdinData, err = overrideCNIConfigWithServerConfig(cniRequest.Config, overrideConf, s.ignoreReadinessIndicator)
+		if err != nil {
+			return "", nil, err
+		}
+		return cmd, cniCmdArgs, nil
+	}
+
 	cniCmdArgs.ContainerID, ok = cniRequest.Env["CNI_CONTAINERID"]
 	if !ok {
 		return "", nil, fmt.Errorf("missing CNI_CONTAINERID")
@@ -622,6 +687,16 @@ func (s *Server) cmdCheck(cmdArgs *skel.CmdArgs, k8sArgs *types.K8sArgs) error {
 	return multus.CmdCheck(cmdArgs, s.exec, s.kubeclient)
 }
 
+func (s *Server) cmdGC(cmdArgs *skel.CmdArgs, _ *types.K8sArgs) error {
+	logging.Debugf("CmdGC. CNI conf: %+v", *cmdArgs)
+	return multus.CmdGC(cmdArgs, s.exec, s.kubeclient)
+}
+
+func (s *Server) cmdStatus(cmdArgs *skel.CmdArgs, _ *types.K8sArgs) error {
+	logging.Debugf("CmdStatus. CNI conf: %+v", *cmdArgs)
+	return multus.CmdStatus(cmdArgs, s.exec, s.kubeclient)
+}
+
 func serializeResult(result cnitypes.Result) ([]byte, error) {
 	// cni result is converted to latest here and decoded to specific cni version at multus-shim
 	realResult, err := cni100.NewResultFromResult(result)
@@ -685,6 +760,15 @@ func (s *Server) cmdDelegateCheck(cmdArgs *skel.CmdArgs, k8sArgs *types.K8sArgs,
 	delegateCNIConf.Bytes = cmdArgs.StdinData
 	rt, _ := types.CreateCNIRuntimeConf(cmdArgs, k8sArgs, cmdArgs.IfName, nil, delegateCNIConf)
 	return multus.DelegateCheck(s.exec, delegateCNIConf, rt, multusConfig)
+}
+
+func (s *Server) cmdDelegateStatus(cmdArgs *skel.CmdArgs, k8sArgs *types.K8sArgs, multusConfig *types.NetConf) error {
+	delegateCNIConf, err := types.LoadDelegateNetConf(cmdArgs.StdinData, nil, "", "")
+	if err != nil {
+		return err
+	}
+	rt, _ := types.CreateCNIRuntimeConf(cmdArgs, k8sArgs, cmdArgs.IfName, nil, delegateCNIConf)
+	return multus.DelegateStatus(s.exec, delegateCNIConf, rt, multusConfig)
 }
 
 // note: this function may send back error to the client. In cni spec, command DEL should NOT send any error

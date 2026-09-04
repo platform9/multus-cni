@@ -110,7 +110,6 @@ type kubeletClient struct {
 }
 
 func (rc *kubeletClient) getPodResources(client podresourcesapi.PodResourcesListerClient) error {
-
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -137,17 +136,36 @@ func (rc *kubeletClient) GetPodResourceMap(pod *v1.Pod) (map[string]*types.Resou
 	for _, pr := range rc.resources {
 		if pr.Name == name && pr.Namespace == ns {
 			for _, cnt := range pr.Containers {
-				for _, dev := range cnt.Devices {
-					if rInfo, ok := resourceMap[dev.ResourceName]; ok {
-						rInfo.DeviceIDs = append(rInfo.DeviceIDs, dev.DeviceIds...)
-					} else {
-						resourceMap[dev.ResourceName] = &types.ResourceInfo{DeviceIDs: dev.DeviceIds}
-					}
-				}
+				rc.getDevicePluginResources(cnt.Devices, resourceMap)
 			}
 		}
 	}
 	return resourceMap, nil
+}
+
+func (rc *kubeletClient) getDevicePluginResources(devices []*podresourcesapi.ContainerDevices, resourceMap map[string]*types.ResourceInfo) {
+	// One container may have several ContainerDevices rows for the same
+	// ResourceName. Aggregate those IDs, sort once, then append so this
+	// container contributes a single deterministic list without reordering
+	// other containers already in resourceMap.
+	aggregated := map[string][]string{}
+	var resourceOrder []string
+	seen := map[string]struct{}{}
+	for _, dev := range devices {
+		if _, ok := seen[dev.ResourceName]; !ok {
+			seen[dev.ResourceName] = struct{}{}
+			resourceOrder = append(resourceOrder, dev.ResourceName)
+		}
+		aggregated[dev.ResourceName] = append(aggregated[dev.ResourceName], dev.DeviceIds...)
+	}
+	for _, name := range resourceOrder {
+		deviceIDs := types.CopyAndSortDeviceIDs(aggregated[name])
+		if rInfo, ok := resourceMap[name]; ok {
+			rInfo.DeviceIDs = append(rInfo.DeviceIDs, deviceIDs...)
+		} else {
+			resourceMap[name] = &types.ResourceInfo{DeviceIDs: deviceIDs}
+		}
+	}
 }
 
 func hasKubeletAPIEndpoint(url *url.URL) bool {
